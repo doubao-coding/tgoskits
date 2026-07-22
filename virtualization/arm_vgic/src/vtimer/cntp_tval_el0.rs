@@ -22,7 +22,7 @@ use axdevice_base::{
     AccessWidth, BaseDeviceOps, DeviceAddrRange, DeviceResult, EmuDeviceType, SysRegAddr,
     SysRegAddrRange,
 };
-use log::info;
+use log::trace;
 
 use crate::host;
 
@@ -52,9 +52,9 @@ impl BaseDeviceOps<SysRegAddrRange> for SysCntpTvalEl0 {
         _width: AccessWidth,
         val: usize,
     ) -> DeviceResult {
-        info!("Write to emulator register: {addr:?}, value: {val}");
+        trace!("Write to emulator register: {addr:?}, value: {val}");
         let now = host::current_time_nanos();
-        info!("Current time: {}, deadline: {}", now, now + val as u64);
+        trace!("Current time: {}, deadline: {}", now, now + val as u64);
         host::register_timer(
             Duration::from_nanos(now + val as u64),
             Box::new(|_| {

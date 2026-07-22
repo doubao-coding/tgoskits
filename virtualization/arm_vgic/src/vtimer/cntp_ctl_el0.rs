@@ -17,7 +17,7 @@ use axdevice_base::{
     AccessWidth, BaseDeviceOps, DeviceAddrRange, DeviceResult, EmuDeviceType, SysRegAddr,
     SysRegAddrRange,
 };
-use log::info;
+use log::trace;
 
 impl BaseDeviceOps<SysRegAddrRange> for SysCntpCtlEl0 {
     fn emu_type(&self) -> EmuDeviceType {
@@ -45,7 +45,7 @@ impl BaseDeviceOps<SysRegAddrRange> for SysCntpCtlEl0 {
         _width: AccessWidth,
         val: usize,
     ) -> DeviceResult {
-        info!("Write to emulator register: {addr:?}, value: {val}");
+        trace!("Write to emulator register: {addr:?}, value: {val}");
         Ok(())
     }
 }
