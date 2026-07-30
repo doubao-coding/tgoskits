@@ -83,7 +83,10 @@ impl PlatOp for Plat {
 
     fn init_boot_irq_cpu(cpu_idx: usize, role: crate::irq::CpuBootRole) {
         match role {
-            crate::irq::CpuBootRole::Primary => {}
+            crate::irq::CpuBootRole::Primary => {
+                let _ = cpu_idx;
+                systick::setup_systick_irq();
+            }
             crate::irq::CpuBootRole::Secondary => {
                 gic::init_cpu(cpu_idx);
                 systick::setup_systick_irq();

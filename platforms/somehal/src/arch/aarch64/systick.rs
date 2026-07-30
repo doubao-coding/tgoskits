@@ -20,10 +20,9 @@ module_driver!(
 );
 
 pub(crate) fn setup_systick_irq() {
-    let id = systick_irq();
-    if let Err(err) = super::gic::irq_set_enable(id, true) {
-        warn!("failed to enable ARMv8 timer IRQ {id:?}: {err:?}");
-    }
+    // The runtime IRQ framework owns timer PPI enablement after registering
+    // the OS timer handler. Keep this hook as the architecture-local setup
+    // point without unmasking an interrupt that may not yet have an action.
 }
 
 fn probe(probe: ProbeFdt<'_>) -> Result<(), OnProbeError> {

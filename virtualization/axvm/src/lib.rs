@@ -77,7 +77,7 @@ pub use manager::{
 pub(crate) use task::{AsVCpuTask, VCpuTask};
 pub use vm::{
     AxVM, AxVMRef, FwCfgDeviceConfig, PreparedMemoryLayout, VMMemoryRegion, VcpuSnapshot,
-    prepare::PrepareProfile,
+    prepare::{PrepareProfile, default_prepare_factories},
 };
 
 /// The architecture-independent per-CPU type.

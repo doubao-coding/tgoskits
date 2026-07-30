@@ -22,7 +22,7 @@ use crate::{
         prepare::{
             ArchDeviceBootstrap, PreparedVm, VmInitRequest,
             address_space::{guest_owned_regions, map_guest_address_space},
-            complete_vm_init, default_device_factories,
+            complete_vm_init, default_prepare_factories,
             devices::PreparedDevices,
             validate_guest_dtb,
             vcpus::{PreparedVcpus, vcpu_placements},
@@ -62,8 +62,7 @@ impl X86_64Arch {
 }
 
 fn prepare_device_bootstrap(vm: &AxVM) -> AxVmResult<ArchDeviceBootstrap> {
-    let mut factories = default_device_factories()?;
-    super::register_device_factories(&mut factories)?;
+    let factories = default_prepare_factories()?;
     Ok(ArchDeviceBootstrap::new(
         factories,
         crate::InterruptFabric::new(vm.interrupt_mode()),

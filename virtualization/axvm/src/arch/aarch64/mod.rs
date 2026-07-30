@@ -72,6 +72,12 @@ impl ArchOps for Aarch64Arch {
         );
     }
 
+    fn register_static_device_factories(
+        factories: &mut axdevice::DeviceFactoryRegistry,
+    ) -> axdevice::DeviceManagerResult {
+        vm::register_device_factories(factories)
+    }
+
     fn handle_vcpu_exit_bound(
         vm: &crate::AxVMRef,
         vcpu: &crate::vm::AxVCpuRef<Self::VCpu>,

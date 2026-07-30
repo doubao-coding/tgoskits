@@ -425,7 +425,15 @@ pub(crate) fn init_percpu_irq(cpu_id: usize) {
     ax_hal::irq::init_common_irq_handler();
 
     if ax_hal::percpu::this_cpu_is_bsp() {
+        #[cfg(feature = "smp")]
+        let cpus = ax_hal::irq::CpuMask::first_n(crate::build_info::CPU_CAPACITY);
+        #[cfg(not(feature = "smp"))]
         let cpus = ax_hal::irq::CpuMask::first_n(ax_hal::cpu_num());
+        info!(
+            "register timer IRQ {:?} for CPUs {:?}",
+            ax_hal::time::irq_num(),
+            cpus
+        );
         ax_hal::irq::request_percpu_irq(ax_hal::time::irq_num(), cpus, timer_irq_handler)
             .expect("failed to register timer IRQ handler");
 

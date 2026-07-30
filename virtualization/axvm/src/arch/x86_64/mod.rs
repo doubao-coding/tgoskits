@@ -67,6 +67,12 @@ impl ArchOps for X86_64Arch {
         x86_vcpu::initialize_hardware_support().is_ok()
     }
 
+    fn register_static_device_factories(
+        factories: &mut DeviceFactoryRegistry,
+    ) -> DeviceManagerResult {
+        register_device_factories(factories)
+    }
+
     fn before_first_run(vm: &crate::AxVMRef, vcpu: &crate::vm::AxVCpuRef<Self::VCpu>) {
         irq::enable_ioapic_irq_forwarding(vm, vcpu);
     }

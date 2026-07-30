@@ -2,4 +2,5 @@
 features = ["ax-driver/virtio-net"]
 log = "Info"
 target = "aarch64-unknown-none-softfloat"
+max_cpu_num = 4
 vm_configs = []

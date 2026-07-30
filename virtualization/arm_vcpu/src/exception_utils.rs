@@ -197,7 +197,7 @@ pub const fn exception_sysreg_addr(iss: usize) -> usize {
 /// - `false` otherwise.
 #[inline(always)]
 pub fn exception_data_abort_is_permission_fault() -> bool {
-    (exception_iss() & 0b111111 & (0xf << 2)) == 12
+    data_abort_dfsc_is_permission_fault(data_abort_dfsc(exception_iss()))
 }
 
 /// Determines the access width of a data abort exception.
@@ -217,7 +217,22 @@ pub fn exception_data_abort_handleable() -> bool {
 
 #[inline(always)]
 pub fn exception_data_abort_is_translate_fault() -> bool {
-    (exception_iss() & 0b111111 & (0xf << 2)) == 4
+    data_abort_dfsc_is_translation_fault(data_abort_dfsc(exception_iss()))
+}
+
+#[inline(always)]
+fn data_abort_dfsc(iss: usize) -> usize {
+    iss & 0b11_1111
+}
+
+#[inline(always)]
+fn data_abort_dfsc_is_permission_fault(dfsc: usize) -> bool {
+    (dfsc & (0xf << 2)) == 12
+}
+
+#[inline(always)]
+fn data_abort_dfsc_is_translation_fault(dfsc: usize) -> bool {
+    (dfsc & (0xf << 2)) == 4
 }
 
 /// Checks if the data abort exception was caused by a write access.
@@ -304,4 +319,25 @@ macro_rules! restore_regs_from_stack {
         ldp     x29, x30, [sp, 10 * 8]
         add     sp, sp, 12 * 8"
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{data_abort_dfsc_is_permission_fault, data_abort_dfsc_is_translation_fault};
+
+    #[test]
+    fn data_abort_translation_fault_matches_all_levels() {
+        for dfsc in 0x04..=0x07 {
+            assert!(data_abort_dfsc_is_translation_fault(dfsc));
+        }
+        assert!(!data_abort_dfsc_is_translation_fault(0x08));
+    }
+
+    #[test]
+    fn data_abort_permission_fault_matches_all_levels() {
+        for dfsc in 0x0c..=0x0f {
+            assert!(data_abort_dfsc_is_permission_fault(dfsc));
+        }
+        assert!(!data_abort_dfsc_is_permission_fault(0x04));
+    }
 }

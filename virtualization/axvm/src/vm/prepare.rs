@@ -11,7 +11,12 @@ use axvm_types::VMInterruptMode;
 
 use self::{devices::PreparedDevices, vcpus::PreparedVcpus};
 use super::{AxVM, AxVMResources};
-use crate::{AxVmResult, ax_err, ax_err_type, irq::InterruptFabric};
+use crate::{
+    AxVmResult,
+    arch::{ArchOps, CurrentArch},
+    ax_err, ax_err_type,
+    irq::InterruptFabric,
+};
 
 /// Rebuilds the per-VM device factory registry and interrupt fabric for one
 /// prepare generation.
@@ -125,6 +130,18 @@ pub(crate) fn default_device_factories() -> AxVmResult<DeviceFactoryRegistry> {
     Ok(factories)
 }
 
+/// Builds the same built-in plus architecture-static device factory registry
+/// used by the default VM prepare path.
+///
+/// OS glue that installs a custom [`PrepareProfile`] should extend this registry
+/// instead of starting from an empty one, otherwise architecture-owned emulated
+/// devices from the VM configuration may become unbuildable.
+pub fn default_prepare_factories() -> AxVmResult<DeviceFactoryRegistry> {
+    let mut factories = default_device_factories()?;
+    CurrentArch::register_static_device_factories(&mut factories)?;
+    Ok(factories)
+}
+
 /// Adds VM-local boot-payload factories to an architecture's static registry.
 ///
 /// Only architectures that expose such a configured device should call this:
@@ -139,6 +156,28 @@ pub(crate) fn register_boot_payload_factories(
         factories.register(Arc::new(FwCfgPayloadFactory::new(payload)))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn default_prepare_factories_include_aarch64_gic_factories() {
+        let factories = super::default_prepare_factories().unwrap();
+
+        assert!(
+            factories
+                .get(axvm_types::EmulatedDeviceType::GPPTDistributor)
+                .is_some(),
+            "default prepare registry must include the AArch64 GIC distributor factory"
+        );
+        assert!(
+            factories
+                .get(axvm_types::EmulatedDeviceType::GPPTRedistributor)
+                .is_some(),
+            "default prepare registry must include the AArch64 GIC redistributor factory"
+        );
+    }
 }
 
 pub(crate) fn complete_vm_init(

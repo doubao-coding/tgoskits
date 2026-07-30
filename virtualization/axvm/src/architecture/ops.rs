@@ -4,6 +4,7 @@ use alloc::{format, vec::Vec};
 
 use ax_memory_addr::VirtAddr;
 use axaddrspace::NestedPageTableOps;
+use axdevice::{DeviceFactoryRegistry, DeviceManagerResult};
 use axvm_types::{VmArchPerCpuOps, VmArchVcpuOps, VmVcpuState};
 
 use super::{BoundVcpuExit, VcpuRunAction};
@@ -20,6 +21,12 @@ pub(crate) trait ArchOps {
     fn clean_dcache_range(_addr: VirtAddr, _size: usize) {}
 
     fn register_platform_irq_injector() {}
+
+    fn register_static_device_factories(
+        _factories: &mut DeviceFactoryRegistry,
+    ) -> DeviceManagerResult {
+        Ok(())
+    }
 
     fn vcpu_affinities(
         cpu_num: usize,

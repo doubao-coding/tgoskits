@@ -24,7 +24,7 @@ pub mod worker;
 
 use alloc::sync::{Arc, Weak};
 
-use axdevice::{DeviceFactoryRegistry, register_builtin_factories};
+use axdevice::DeviceFactoryRegistry;
 use axvm::{AxVM, AxVmResult, InterruptFabric, PrepareProfile, VmQueuedIrqSink};
 use axvm_types::VMInterruptMode;
 
@@ -56,8 +56,7 @@ impl PrepareProfile for VirtioNetPrepareProfile {
     }
 
     fn build(&self, generation: usize) -> AxVmResult<(DeviceFactoryRegistry, InterruptFabric)> {
-        let mut factories = DeviceFactoryRegistry::new();
-        register_builtin_factories(&mut factories)?;
+        let mut factories = axvm::default_prepare_factories()?;
         factories.register(Arc::new(factory::VirtioNetDeviceFactory::new(
             self.vm.clone(),
             generation,

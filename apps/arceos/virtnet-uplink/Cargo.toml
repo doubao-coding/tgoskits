@@ -7,7 +7,7 @@ publish = false
 
 [features]
 default = []
-arceos = ["dep:ax-std", "ax-std/net", "ax-std/dns"]
+arceos = ["dep:ax-std", "ax-std/arceos", "ax-std/net", "ax-std/dns"]
 
 [dependencies]
 ax-std = { workspace = true, optional = true }
