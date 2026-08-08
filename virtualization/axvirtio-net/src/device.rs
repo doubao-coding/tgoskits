@@ -236,19 +236,27 @@ impl<B: NetworkBackend, T: GuestMemoryAccessor + Clone> VirtioMmioNetDevice<B, T
         let chain = tx.descriptor_chain_with_memory(head, memory)?;
 
         // Aggregate all device-readable bytes (header + payload).
-        let mut buf: Vec<u8> = Vec::new();
+        let readable_len = chain.readable_len()?;
+        let header_len = self.header_len();
+        if readable_len < header_len || readable_len - header_len > MAX_FRAME_SIZE {
+            return Err(NetError::FrameTooLarge);
+        }
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(readable_len)
+            .map_err(|_| NetError::FrameTooLarge)?;
         for d in chain.readable() {
             let start = buf.len();
-            buf.resize(start + d.len as usize, 0);
+            buf.resize(
+                start
+                    .checked_add(d.len as usize)
+                    .ok_or(NetError::FrameTooLarge)?,
+                0,
+            );
             memory
                 .read(d.base_addr, &mut buf[start..])
                 .map_err(|_| NetError::GuestMemoryFault)?;
         }
 
-        let header_len = self.header_len();
-        if buf.len() < header_len {
-            return Err(NetError::InvalidDescriptor);
-        }
         let hdr = VirtioNetHdr::from_le_bytes(&buf).ok_or(NetError::InvalidDescriptor)?;
         if hdr.requests_offload() {
             return Err(NetError::UnsupportedOffload);

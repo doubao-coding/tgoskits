@@ -359,7 +359,11 @@ pub(crate) fn patch_guest_fdt_for_runtime(
         gic_profile,
         plic_profile,
     )?;
-    install_configured_virtio_net(&mut tree, crate_config)?;
+    install_configured_virtio_net(
+        &mut tree,
+        crate_config,
+        gic_profile.and_then(|p| p.node_phandle),
+    )?;
     super::timer::install_machine_timer(&mut tree, timer_profile)?;
     super::serial::install_machine_serial(&mut tree, serial_profile, serial_identity)?;
     for serial in additional_serials {
@@ -372,7 +376,11 @@ pub(crate) fn patch_guest_fdt_for_runtime(
     Ok(bytes)
 }
 
-fn install_configured_virtio_net(tree: &mut FdtTree, config: &GuestConfig) -> AxVmResult {
+fn install_configured_virtio_net(
+    tree: &mut FdtTree,
+    config: &GuestConfig,
+    interrupt_parent: Option<u32>,
+) -> AxVmResult {
     if !config
         .devices
         .virtual_devices
@@ -395,6 +403,9 @@ fn install_configured_virtio_net(tree: &mut FdtTree, config: &GuestConfig) -> Ax
         .ok_or_else(|| ax_err_type!(InvalidData, "new virtio-net node is missing"))?
         .set_regs(&[RegInfo::new(BASE as u64, Some(SIZE as u64))]);
     tree.set_property(node_id, u32_list_property("interrupts", &[0, SPI, 1]))?;
+    if let Some(phandle) = interrupt_parent {
+        tree.set_property(node_id, u32_list_property("interrupt-parent", &[phandle]))?;
+    }
     tree.set_property(node_id, Property::new("dma-coherent", std::vec![]))?;
     Ok(())
 }

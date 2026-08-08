@@ -87,5 +87,25 @@ falls back to a guessed MMIO address, IRQ, MAC address, or host interface.
   the correct device receives scoped memory during polling.
 - Add AxVisor model tests for options, resource requirements, and bundle grants.
 - Boot two ArceOS guests under QEMU/AxVisor and require deterministic two-way
-  packet exchange. Record the exact `cargo xtask` commands and success regexes.
+  packet exchange. From a clean checkout, build each image before launching
+  AxVisor (the VM TOML files intentionally reference these generated files):
+
+  ```bash
+  cargo xtask arceos build -p arceos-virtio-net-peer \
+    -c apps/arceos/build-aarch64-virtio-net-peer-vm1.toml
+  llvm-objcopy --strip-all -O binary \
+    target/aarch64-unknown-linux-musl/release/arceos-virtio-net-peer \
+    target/aarch64-unknown-linux-musl/release/arceos-virtio-net-peer-vm1.bin
+  cargo xtask arceos build -p arceos-virtio-net-peer \
+    -c apps/arceos/build-aarch64-virtio-net-peer-vm2.toml
+  llvm-objcopy --strip-all -O binary \
+    target/aarch64-unknown-linux-musl/release/arceos-virtio-net-peer \
+    target/aarch64-unknown-linux-musl/release/arceos-virtio-net-peer-vm2.bin
+  cargo xtask axvisor qemu \
+    --config os/axvisor/configs/board/qemu-aarch64-virtio-net-peer.toml \
+    --qemu-config os/axvisor/configs/qemu/qemu-aarch64-virtio-net-peer.toml
+  ```
+
+  The QEMU runner requires both `VM1_VIRTIO_NET_PASS` and
+  `VM2_VIRTIO_NET_PASS`; either `*_FAIL` marker or a panic is a failure.
 - Run `cargo fmt` and targeted clippy for every changed crate.

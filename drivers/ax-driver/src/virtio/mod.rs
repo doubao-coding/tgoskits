@@ -44,6 +44,10 @@ crate::model_register!(
 fn probe_fdt(probe: rdrive::register::ProbeFdt<'_>) -> Result<(), rdrive::probe::OnProbeError> {
     let (info, platform_device) = probe.into_parts();
     let (device_type, transport) = probe_fdt_mmio_device(&info)?;
+    #[cfg(feature = "virtio-net")]
+    if device_type == DeviceType::Network {
+        return net::register_fdt_transport(&info, platform_device, transport);
+    }
     register_static_transport(platform_device, device_type, transport)
 }
 
