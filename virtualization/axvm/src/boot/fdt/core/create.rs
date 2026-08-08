@@ -17,6 +17,7 @@ use std::{ptr::NonNull, string::String, vec::Vec};
 use ax_memory_addr::MemoryAddr;
 use axvmconfig::GuestConfig;
 use fdt_edit::{Fdt, Node, NodeId, Property};
+use fdt_raw::RegInfo;
 
 use super::tree::{FdtTree, GuestMemorySpec};
 use crate::{
@@ -81,6 +82,13 @@ fn should_keep_generated_node(
     if machine_interrupt_providers
         .iter()
         .any(|controller| is_path_or_ancestor(node_path, controller))
+    {
+        return true;
+    }
+
+    if node
+        .compatibles()
+        .any(|compatible| matches!(compatible, "arm,psci" | "arm,psci-0.2" | "arm,psci-1.0"))
     {
         return true;
     }
@@ -351,12 +359,50 @@ pub(crate) fn patch_guest_fdt_for_runtime(
         gic_profile,
         plic_profile,
     )?;
+    install_configured_virtio_net(&mut tree, crate_config)?;
     super::timer::install_machine_timer(&mut tree, timer_profile)?;
     super::serial::install_machine_serial(&mut tree, serial_profile, serial_identity)?;
     for serial in additional_serials {
         super::serial::install_additional_serial(&mut tree, *serial)?;
     }
-    Ok(tree.finish())
+    let bytes = tree.finish();
+    Fdt::from_bytes(&bytes).map_err(|error| {
+        ax_err_type!(InvalidData, std::format!("invalid patched FDT: {error:?}"))
+    })?;
+    Ok(bytes)
+}
+
+fn install_configured_virtio_net(tree: &mut FdtTree, config: &GuestConfig) -> AxVmResult {
+    if !config
+        .devices
+        .virtual_devices
+        .iter()
+        .any(|device| device.model == "virtio-net")
+    {
+        return Ok(());
+    }
+
+    const BASE: u32 = 0x0a00_0000;
+    const SIZE: u32 = 0x200;
+    const SPI: u32 = 16;
+    let node_id = tree.ensure_path("/virtio_mmio@a000000")?;
+    tree.set_property(
+        node_id,
+        super::tree::prop_string("compatible", "virtio,mmio"),
+    )?;
+    tree.inner_mut()
+        .view_typed_mut(node_id)
+        .ok_or_else(|| ax_err_type!(InvalidData, "new virtio-net node is missing"))?
+        .set_regs(&[RegInfo::new(BASE as u64, Some(SIZE as u64))]);
+    tree.set_property(node_id, u32_list_property("interrupts", &[0, SPI, 1]))?;
+    tree.set_property(node_id, Property::new("dma-coherent", std::vec![]))?;
+    Ok(())
+}
+
+fn u32_list_property(name: &str, values: &[u32]) -> Property {
+    let mut property = Property::new(name, std::vec![]);
+    property.set_u32_ls(values);
+    property
 }
 
 pub(crate) fn calculate_dtb_load_addr(vm: AxVMRef, fdt_size: usize) -> AxVmResult<GuestPhysAddr> {
