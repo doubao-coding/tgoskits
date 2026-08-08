@@ -91,20 +91,11 @@ falls back to a guessed MMIO address, IRQ, MAC address, or host interface.
   AxVisor (the VM TOML files intentionally reference these generated files):
 
   ```bash
-  cargo xtask arceos build -p arceos-virtio-net-peer \
-    -c apps/arceos/build-aarch64-virtio-net-peer-vm1.toml
-  llvm-objcopy --strip-all -O binary \
-    target/aarch64-unknown-linux-musl/release/arceos-virtio-net-peer \
-    target/aarch64-unknown-linux-musl/release/arceos-virtio-net-peer-vm1.bin
-  cargo xtask arceos build -p arceos-virtio-net-peer \
-    -c apps/arceos/build-aarch64-virtio-net-peer-vm2.toml
-  llvm-objcopy --strip-all -O binary \
-    target/aarch64-unknown-linux-musl/release/arceos-virtio-net-peer \
-    target/aarch64-unknown-linux-musl/release/arceos-virtio-net-peer-vm2.bin
-  cargo xtask axvisor qemu \
-    --config os/axvisor/configs/board/qemu-aarch64-virtio-net-peer.toml \
-    --qemu-config os/axvisor/configs/qemu/qemu-aarch64-virtio-net-peer.toml
+  scripts/axvisor/build-virtio-net-peer.sh
   ```
+
+  Set `LLVM_OBJCOPY` when the toolchain is installed outside the pinned Rust
+  sysroot.
 
   The QEMU runner requires both `VM1_VIRTIO_NET_PASS` and
   `VM2_VIRTIO_NET_PASS`; either `*_FAIL` marker or a panic is a failure.
