@@ -1,0 +1,6 @@
+features = [
+  "qemu",
+  "ax-driver/nvme",
+]
+log = "Warn"
+target = "aarch64-unknown-none-softfloat"

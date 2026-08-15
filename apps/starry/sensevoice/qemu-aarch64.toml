@@ -1,0 +1,23 @@
+args = [
+  "-nographic",
+  "-m", "4g",
+  "-cpu", "cortex-a53",
+  "-device", "nvme,drive=disk0,serial=tgoskits,max_ioqpairs=64,msix_qsize=65",
+  "-drive", "id=disk0,if=none,format=raw,file=${workspace}/tmp/axbuild/rootfs/rootfs-aarch64-sensevoice.img",
+]
+uefi = false
+to_bin = true
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = "/usr/bin/sensevoice-test.sh"
+success_regex = ["(?m)^SENSEVOICE_TEST_PASSED\\s*$"]
+fail_regex = [
+  "(?m)^SENSEVOICE_TEST_FAILED:",
+  "(?i)kernel panic",
+  "(?i)panicked at",
+  "(?i)segmentation fault",
+  "(?i)illegal instruction",
+  "(?i)bus error",
+  "(?i)out of memory",
+]
+# QEMU TCG CPU-only inference of the int8 model takes minutes, not seconds.
+timeout = 1800
