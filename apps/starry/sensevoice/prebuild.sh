@@ -16,41 +16,52 @@ if [[ "$arch" != "aarch64" ]]; then
 fi
 
 # Download sources; SENSEVOICE_DOWNLOAD_PREFIX can point at a mirror that
-# proxies GitHub (e.g. https://ghfast.top) for constrained networks.
+# proxies GitHub (e.g. https://ghfast.top) for constrained networks. Model
+# files additionally fall back between the HF mirror and huggingface.co.
 dl_prefix="${SENSEVOICE_DOWNLOAD_PREFIX:-}"
 sherpa_url_base="https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.5"
+sherpa_url_mirror="https://ghfast.top/https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.5"
 sherpa_asset="sherpa-onnx-v1.13.5-linux-aarch64-static.tar.bz2"
 model_repo="csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
-model_base="https://huggingface.co/${model_repo}/resolve/main"
+model_mirror="https://hf-mirror.com/${model_repo}/resolve/main"
+model_direct="https://huggingface.co/${model_repo}/resolve/main"
 
 cache_dir="${SENSEVOICE_CACHE_DIR:-$workspace/target/sensevoice-cache}"
 mkdir -p "$cache_dir/test_wavs"
 
 fetch() {
-    local path="$1" url="$2" attempt rc
+    local path="$1"; shift
+    local urls=("$@")
     if [[ -s "$cache_dir/$path" ]]; then
         return
     fi
-    # 镜像偶发 TLS EOF/连接重置：指数退避重试，断点续传。
+    # Mirrors occasionally reset mid-transfer; retry across every source with
+    # exponential backoff and byte-range resume (-C -).
+    local attempt url rc
     for attempt in 1 2 3 4 5; do
-        if curl -L --retry 5 --retry-all-errors -C - \
-            -o "$cache_dir/$path" "${dl_prefix}${url}"; then
-            return
-        fi
-        rc=$?
-        echo "download $path failed (rc=$rc), attempt $attempt/5; retrying in $((attempt * 10))s" >&2
+        for url in "${urls[@]}"; do
+            if curl -L --retry 5 --retry-all-errors -C - \
+                -o "$cache_dir/$path" "${url}"; then
+                return
+            fi
+            rc=$?
+            echo "download $path from $url failed (rc=$rc), " \
+                "attempt $attempt/5" >&2
+        done
         sleep $((attempt * 10))
     done
-    echo "ERROR: failed to download $path" >&2
+    echo "ERROR: failed to download $path from any source" >&2
     exit 1
 }
 
-fetch "$sherpa_asset" "$sherpa_url_base/$sherpa_asset"
-fetch model.int8.onnx "$model_base/model.int8.onnx"
-fetch tokens.txt "$model_base/tokens.txt"
-fetch test_wavs/zh.wav "$model_base/test_wavs/zh.wav"
-fetch test_wavs/en.wav "$model_base/test_wavs/en.wav"
-fetch LICENSE "$model_base/LICENSE"
+fetch "$sherpa_asset" \
+    "${dl_prefix}${sherpa_url_base}/$sherpa_asset" \
+    "${sherpa_url_mirror}/$sherpa_asset"
+fetch model.int8.onnx "$model_mirror/model.int8.onnx" "$model_direct/model.int8.onnx"
+fetch tokens.txt "$model_mirror/tokens.txt" "$model_direct/tokens.txt"
+fetch test_wavs/zh.wav "$model_mirror/test_wavs/zh.wav" "$model_direct/test_wavs/zh.wav"
+fetch test_wavs/en.wav "$model_mirror/test_wavs/en.wav" "$model_direct/test_wavs/en.wav"
+fetch LICENSE "$model_mirror/LICENSE" "$model_direct/LICENSE"
 
 if [[ ! -x "$cache_dir/sherpa-onnx-v1.13.5-linux-aarch64-static/bin/sherpa-onnx-offline" ]]; then
     tar -xjf "$cache_dir/$sherpa_asset" -C "$cache_dir"
