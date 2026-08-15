@@ -833,6 +833,7 @@ dependencies = [
  "ax-sync",
  "axklib",
  "axtest",
+ "bitflags 2.13.1",
  "crab-usb",
  "cv181x-sdhci",
  "dma-api",
