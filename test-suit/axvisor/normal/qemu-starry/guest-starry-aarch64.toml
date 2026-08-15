@@ -1,0 +1,16 @@
+# Build config for the StarryOS guest kernel embedded into Axvisor by
+# os/axvisor/configs/vms/qemu/aarch64/starry-smp1.toml (image_location =
+# "memory"). Keep this feature set minimal: the guest sees no PCIe (the NVMe
+# namespace stays with the host), and its only storage is the IRQ-driven
+# virtio-blk device, which needs the block runtime ("qemu" enables
+# ax-runtime/irq) plus the ax-driver/virtio-blk controller.
+#
+# Build with:
+#   cargo xtask starry build \
+#     -c test-suit/axvisor/normal/qemu-starry/guest-starry-aarch64.toml
+features = [
+  "qemu",
+  "ax-driver/virtio-blk",
+]
+log = "Info"
+target = "aarch64-unknown-none-softfloat"

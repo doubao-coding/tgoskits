@@ -28,6 +28,10 @@ fail_regex = [
   "(?i)illegal instruction",
   "(?i)bus error",
   "(?i)out of memory",
+  # See qemu-starry/smoke: a guest spinning in EL2 exception loops must fail
+  # fast instead of burning the full timeout.
+  "ESR_EL2",
+  "(?m)^memory allocation of \\d+ bytes failed$",
 ]
 # Concurrent console streams may prepend ANSI SGR resets to a completion line.
 success_regex = [

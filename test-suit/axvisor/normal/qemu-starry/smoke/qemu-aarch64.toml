@@ -23,6 +23,11 @@ fail_regex = [
   "(?i)unhandled page fault",
   "Failed to initialize guest VM",
   "failed to initialize AxVM manager",
+  # A guest spinning in EL2 exception loops (e.g. memory regions crossing the
+  # 4 GiB physical boundary) never reaches a shell; fail fast instead of
+  # burning the full timeout. Healthy boots log zero ESR_EL2 lines.
+  "ESR_EL2",
+  "(?m)^memory allocation of \\d+ bytes failed$",
 ]
 # Concurrent console streams may prepend ANSI SGR resets to a completion line.
 success_regex = [
