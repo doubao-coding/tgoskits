@@ -27,11 +27,22 @@ cache_dir="${SENSEVOICE_CACHE_DIR:-$workspace/target/sensevoice-cache}"
 mkdir -p "$cache_dir/test_wavs"
 
 fetch() {
-    local path="$1" url="$2"
-    if [[ ! -s "$cache_dir/$path" ]]; then
-        echo "downloading $path"
-        curl -L --retry 3 -C - -o "$cache_dir/$path" "${dl_prefix}${url}"
+    local path="$1" url="$2" attempt rc
+    if [[ -s "$cache_dir/$path" ]]; then
+        return
     fi
+    # 镜像偶发 TLS EOF/连接重置：指数退避重试，断点续传。
+    for attempt in 1 2 3 4 5; do
+        if curl -L --retry 5 --retry-all-errors -C - \
+            -o "$cache_dir/$path" "${dl_prefix}${url}"; then
+            return
+        fi
+        rc=$?
+        echo "download $path failed (rc=$rc), attempt $attempt/5; retrying in $((attempt * 10))s" >&2
+        sleep $((attempt * 10))
+    done
+    echo "ERROR: failed to download $path" >&2
+    exit 1
 }
 
 fetch "$sherpa_asset" "$sherpa_url_base/$sherpa_asset"
