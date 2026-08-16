@@ -72,3 +72,7 @@ loongarch64-axvisor-guest-tests.md
 /logs/offline-monitor/
 /images/linux-qemu/
 offline-monitor-analysis*.html
+
+# Large local assets (models, repro packs) - too big for git, preserved
+# outside target/ so cargo clean cannot remove them
+/assets/
