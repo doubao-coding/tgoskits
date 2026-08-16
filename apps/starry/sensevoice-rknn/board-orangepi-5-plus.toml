@@ -1,0 +1,13 @@
+board_type = "OrangePi-5-Plus"
+shell_prefix = "root@starry:/root #"
+shell_init_cmd = "/usr/bin/sensevoice-rknn-test.sh"
+success_regex = ["(?m)^SENSEVOICE_RKNN_TEST_PASSED\\s*$"]
+fail_regex = [
+  "(?m)^SENSEVOICE_RKNN_TEST_FAILED:",
+  "(?i)kernel panic",
+  "(?i)panicked at",
+  "(?i)segmentation fault",
+  "(?i)illegal instruction",
+  "(?i)bus error",
+]
+timeout = 900

@@ -1,0 +1,11 @@
+# StarryOS build config for the sensevoice-rknn board app.
+# rknpu feature wires the RK3588 NPU driver (ax-driver/rknpu →
+# /dev/dri/card1 DRM ioctl surface used by librknnrt). The board uses SDHCI
+# rootfs storage; no qemu-specific virtio features needed.
+features = [
+  "ax-driver/rockchip-sdhci",
+  "fs",
+  "rknpu",
+]
+log = "Info"
+target = "aarch64-unknown-none-softfloat"
