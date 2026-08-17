@@ -364,6 +364,33 @@ fn overlay_has_entries(overlay_dir: &Path) -> anyhow::Result<bool> {
         .is_some())
 }
 
+/// Returns the absolute guest directory holding `relative_path`
+/// (e.g. `usr/bin/x` -> `/usr/bin`, `x` -> `/`) plus the entry's base name.
+///
+/// `debugfs` (e2fsprogs, observed on 1.45.5 and other releases) mis-handles
+/// `write <host> /a/b/c`: instead of resolving the absolute multi-component
+/// filespec, it creates a root directory entry whose name is the literal
+/// `/a/b/c` string. Slashes are illegal in filenames, so `ext2_lookup` can
+/// never match it and `e2fsck` flags it as "invalid characters in name" --
+/// every injected file becomes invisible to the guest, and repeated injects
+/// orphan inodes/blocks until the image hits ENOSPC. `cd /a/b; write <host> c`
+/// resolves correctly, so all file/symlink commands are emitted relative to a
+/// `cd` into the target directory. `mkdir /a/b` resolves correctly and stays
+/// absolute; `symlink` takes a literal target string (not a filespec to
+/// create), so only its *link* path needs the `cd`+basename treatment.
+fn guest_dir_and_name(relative_path: &Path) -> (String, std::ffi::OsString) {
+    let parent = relative_path.parent();
+    let guest_dir = match parent {
+        Some(p) if !p.as_os_str().is_empty() => format!("/{}", p.display()),
+        _ => "/".to_string(),
+    };
+    let base = relative_path
+        .file_name()
+        .map(std::ffi::OsString::from)
+        .unwrap_or_default();
+    (guest_dir, base)
+}
+
 /// Converts an overlay directory tree into a sequence of `debugfs` commands.
 fn collect_overlay_debugfs_commands(
     overlay_dir: &Path,
@@ -407,22 +434,17 @@ fn collect_overlay_debugfs_commands(
              supported",
             entry.path().display()
         );
-        commands.push(format!("rm /{}", relative_path.display()));
-        commands.push(format!(
-            "write {} /{}",
-            entry.path().display(),
-            relative_path.display()
-        ));
+        let (guest_dir, base) = guest_dir_and_name(&relative_path);
+        let base = base.display().to_string();
+        commands.push(format!("cd {}", guest_dir));
+        commands.push(format!("rm {}", base));
+        commands.push(format!("write {} {}", entry.path().display(), base));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let metadata = fs::metadata(entry.path())
                 .with_context(|| format!("failed to stat {}", entry.path().display()))?;
-            commands.push(format!(
-                "sif /{} mode 0{:o}",
-                relative_path.display(),
-                metadata.permissions().mode()
-            ));
+            commands.push(format!("sif {} mode 0{:o}", base, metadata.permissions().mode()));
         }
     }
 
@@ -448,10 +470,12 @@ fn collect_overlay_debugfs_commands(
             } else {
                 host_target.clone()
             };
-            commands.push(format!("rm /{}", relative_path.display()));
+            let (gdir, base) = guest_dir_and_name(&relative_path);
+            commands.push(format!("cd {}", gdir));
+            commands.push(format!("rm {}", base.display()));
             commands.push(format!(
-                "symlink /{} {}",
-                relative_path.display(),
+                "symlink {} {}",
+                base.display(),
                 guest_filespec.display()
             ));
         }
@@ -557,8 +581,9 @@ mod tests {
 
         assert_eq!(commands[0], "mkdir /usr");
         assert!(commands.contains(&"mkdir /usr/bin".to_string()));
-        assert!(commands.contains(&format!("write {} /usr/bin/test-bin", binary.display())));
-        assert!(commands.contains(&"sif /usr/bin/test-bin mode 0100755".to_string()));
+        assert!(commands.contains(&"cd /usr/bin".to_string()));
+        assert!(commands.contains(&format!("write {} test-bin", binary.display())));
+        assert!(commands.contains(&"sif test-bin mode 0100755".to_string()));
     }
 
     /// Symlinks are written after regular files (two-pass) with the correct
@@ -588,11 +613,11 @@ mod tests {
             .unwrap();
         let sym1_pos = commands
             .iter()
-            .position(|c| c == "symlink /usr/lib/libfoo.so.1 /usr/lib/libfoo.so.1.2.0")
+            .position(|c| c == "symlink libfoo.so.1 /usr/lib/libfoo.so.1.2.0")
             .unwrap();
         let sym0_pos = commands
             .iter()
-            .position(|c| c == "symlink /usr/lib/libfoo.so /usr/lib/libfoo.so.1")
+            .position(|c| c == "symlink libfoo.so /usr/lib/libfoo.so.1")
             .unwrap();
 
         assert!(
