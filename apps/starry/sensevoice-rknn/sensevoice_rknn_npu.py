@@ -39,6 +39,11 @@ class RknnTensorAttr(ctypes.Structure):
     _fields_ = [
         ("index", ctypes.c_int32),
         ("n_dims", ctypes.c_uint32),
+        # librknnrt 2.x's rknn_tensor_attr inserts dims[16] right after n_dims
+        # (before name). The old 312-byte layout omitted it; librknnrt 2.3.2's
+        # sizeof is 376, and without dims here the field offsets (name/n_elems
+        # ...) land on zero regions and rknn_query reads back all-zeros.
+        ("dims", ctypes.c_uint32 * 16),
         ("name", ctypes.c_char * 256),
         ("n_elems", ctypes.c_uint32),
         ("size", ctypes.c_uint32),
@@ -141,6 +146,23 @@ class RknnContext:
             raise RuntimeError(f"rknn_init failed: {ret}")
         self.in_attr = self._query(RKNN_QUERY_INPUT_ATTR)
         self.out_attr = self._query(RKNN_QUERY_OUTPUT_ATTR)
+        import sys as _sys
+        _a, _b = self.in_attr, self.out_attr
+        print(f"[dbg] in:  n_dims={_a.n_dims} dims={list(_a.dims[:_a.n_dims])} n_elems={_a.n_elems} type={_a.type} fmt={_a.fmt} qnt={_a.qnt_type} fl={_a.fl} zp={_a.zp} scale={_a.scale} size={_a.size}", file=_sys.stderr)
+        print(f"[dbg] out: n_dims={_b.n_dims} dims={list(_b.dims[:_b.n_dims])} n_elems={_b.n_elems} type={_b.type} fmt={_b.fmt} qnt={_b.qnt_type} fl={_b.fl} zp={_b.zp} scale={_b.scale} size={_b.size}", file=_sys.stderr)
+        # enumerate all inputs/outputs to find the CTC logits ([T, vocab]) output
+        for kind, cmd in (("in", RKNN_QUERY_INPUT_ATTR), ("out", RKNN_QUERY_OUTPUT_ATTR)):
+            for i in range(16):
+                t = RknnTensorAttr(); t.index = i
+                r = self.lib.rknn_query(self.ctx, cmd, ctypes.byref(t), ctypes.sizeof(t))
+                if r != 0:
+                    if i == 0:
+                        print(f"[dbg] {kind}[{i}] query failed {r}", file=_sys.stderr)
+                    else:
+                        print(f"[dbg] {kind} count = {i} (index {i} -> {r})", file=_sys.stderr)
+                    break
+                nm = t.name.split(b"\x00")[0] if t.name else b""
+                print(f"[dbg] {kind}[{i}]: n_dims={t.n_dims} dims={list(t.dims[:t.n_dims])} n_elems={t.n_elems} type={t.type} qnt={t.qnt_type} fl={t.fl} zp={t.zp} scale={t.scale} name={nm}", file=_sys.stderr)
 
     def _query(self, cmd):
         attr = RknnTensorAttr()
@@ -170,16 +192,31 @@ class RknnContext:
             raise RuntimeError(f"rknn_run failed: {ret}")
         ret = self.lib.rknn_wait(self.ctx, None)
         if ret != 0:
-            raise RuntimeError(f"rknn_wait failed: {ret}")
+            # starry's rknpu driver does not provide a dma_fence fd, so
+            # rknn_wait returns -1 ("fence fd = -1 is invalid"). If the run
+            # ioctl executed the NPU job synchronously the outputs are already
+            # ready; proceed to rknn_outputs_get and let it surface a real
+            # failure if not.
+            pass
         out = RknnOutput(want_float=1, is_prealloc=0, index=0, buf=None, size=0)
         ret = self.lib.rknn_outputs_get(self.ctx, 1, ctypes.byref(out), None)
         if ret != 0:
             raise RuntimeError(f"rknn_outputs_get failed: {ret}")
         try:
             count = out.size // 4
-            return np.ctypeslib.as_array(
+            arr = np.ctypeslib.as_array(
                 ctypes.cast(out.buf, ctypes.POINTER(ctypes.c_float)), shape=(count,)
             ).copy()
+            import sys as _sys
+            ne = self.out_attr.n_elems
+            print(f"[dbg] out.size={out.size} count={count} attr.n_elems={ne}", file=_sys.stderr)
+            print(f"[dbg] logits[:5]={arr[:5].tolist()}", file=_sys.stderr)
+            if ne < arr.size:
+                print(f"[dbg] logits[ne-3:ne+3]={arr[ne-3:ne+3].tolist()} (attr n_elems boundary)", file=_sys.stderr)
+                pre = arr[:ne]; post = arr[ne:]
+                print(f"[dbg] first {ne}: nonzero={np.count_nonzero(pre)} min={pre.min():.4f} max={pre.max():.4f}", file=_sys.stderr)
+                print(f"[dbg] after {ne}: nonzero={np.count_nonzero(post)} min={post.min():.4f} max={post.max():.4f}", file=_sys.stderr)
+            return arr
         finally:
             self.lib.rknn_outputs_release(self.ctx, 1, ctypes.byref(out))
 
@@ -385,16 +422,31 @@ def transcribe(ctx, embedding, tokens, cmvn, wav_path, language):
     ).astype(np.float32)  # [1, 3*D]
     xs = speech[None, ...]  # [1, T, LFR_D]
     batch = np.concatenate(
-        [np.tile(query, (t_frames, 1))[:, None, :], xs], axis=2
+        [np.tile(query[None], (1, t_frames, 1)), xs], axis=2
     )  # [1, T, LFR_D + 3D]
+    # RKNN2 fp16 inference can overflow (all-inf output) when intermediate
+    # activations exceed fp16 max (65504). Scale the input down to keep
+    # activations in range. Tune via SENSEVOICE_INPUT_SCALE (try 0.5, 0.1,
+    # 0.01 ... until the output is finite).
+    _scale = float(os.environ.get("SENSEVOICE_INPUT_SCALE", "1.0"))
+    if _scale != 1.0:
+        batch = (batch * _scale).astype(np.float32)
+    import sys as _sys
+    print(f"[dbg] speech shape={speech.shape} inf={np.isinf(speech).sum()} nan={np.isnan(speech).sum()} min={np.nanmin(speech):.4f} max={np.nanmax(speech):.4f}", file=_sys.stderr)
+    print(f"[dbg] query shape={query.shape} inf={np.isinf(query).sum()} nan={np.isnan(query).sum()} min={np.nanmin(query):.4f} max={np.nanmax(query):.4f}", file=_sys.stderr)
+    print(f"[dbg] batch shape={batch.shape} inf={np.isinf(batch).sum()} nan={np.isnan(batch).sum()} min={np.nanmin(batch):.4f} max={np.nanmax(batch):.4f}", file=_sys.stderr)
 
     logits = ctx.run(batch.reshape(1, -1))
     vocab = embedding.shape[1] if embedding.ndim == 2 else None
-    # Output layout is [T, V]; trim V by pieces length when available.
+    # Output layout is [T_out, V]; the model is fixed-shape so T_out is the
+    # model's fixed frame count (e.g. 344 for the scaled encoder), NOT the
+    # input t_frames. Reshape with V on the last axis and let T_out be derived.
     if tokens:
         v = min(len(tokens), logits.shape[-1])
-        return ctc_greedy(logits.reshape(t_frames, -1)[:, :v], tokens)
-    return ctc_greedy(logits.reshape(t_frames, -1), [""] * (logits.shape[-1]))
+        if logits.size % v != 0:
+            raise RuntimeError(f"output size {logits.size} not divisible by vocab {v}")
+        return ctc_greedy(logits.reshape(-1, v), tokens)
+    return ctc_greedy(logits.reshape(-1, logits.shape[-1]), [""] * (logits.shape[-1]))
 
 
 def main():

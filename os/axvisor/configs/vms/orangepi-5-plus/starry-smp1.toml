@@ -11,13 +11,15 @@ phys_cpu_ids = [0x00]
 entry_point = 0x4008_0000
 image_location = "fs"
 kernel_load_addr = 0x4008_0000
-kernel_path = "/guest/starry/orangepi-5-plus"
+kernel_path = "/guest/starry/starryos.bin"
 dtb_load_addr = 0x4000_0000
 
-# Keep a fixed 256 MiB region below 4 GiB for the kernel and DMA32 devices,
-# while allowing ordinary allocations to use the 2 GiB high-memory region.
+# Keep a fixed 1 GiB region below 4 GiB for the kernel, DMA32 devices and the
+# large RKNN model page cache, while allowing ordinary allocations to use the
+# 2 GiB high-memory region. (Was 256 MiB; enlarged so the 490 MiB .rknn read
+# does not pressure the page cache into reclaim, which panicked in atomic ctx.)
 memory_regions = [
-    [0x4000_0000, 0x1000_0000, 0x7, 2],
+    [0x4000_0000, 0x4000_0000, 0x7, 2],
     [0x2_4000_0000, 0x8000_0000, 0x7, 1],
 ]
 

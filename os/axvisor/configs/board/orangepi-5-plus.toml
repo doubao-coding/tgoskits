@@ -1,6 +1,7 @@
 features = [
   "ax-driver/rockchip-sdhci",
   "fs",
+  "rockchip/dwmmc",
 ]
 log = "Info"
 target = "aarch64-unknown-none-softfloat"
