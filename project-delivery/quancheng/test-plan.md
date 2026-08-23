@@ -31,6 +31,64 @@
 | 实时性 | Axvisor 实时 CPU 预留、中断响应、定时器路径、vCPU 调度对 RT 任务的影响；双轮足机器人关注 8ms 平衡控制周期是否持续满足 | 平均延迟、P95/P99、最大延迟、deadline miss 次数 |
 | 稳定性 | 长时间运行、客户机异常、压力负载下底座行为 | 长稳日志、panic/错误统计 |
 
+
+
+### 1) qemu + freertos
+
+数据来源：`benchmark-comparison-noload(1).md`，FreeRTOS Thread-Metric noload 基线，每项 30 秒、6 轮。
+
+| 测试项 | 平均值 | 标准差 | CV |
+| --- | --- | --- | --- |
+| Basic Processing | 4,426,867 | 5,103 | 0.12% |
+| Cooperative Scheduling | 16,351,586 | 556,189 | 3.40% |
+| Preemptive Scheduling | 2,231,704 | 80,898 | 3.62% |
+| Interrupt Processing | 2,236,346 | 80,898 | 3.62% |
+| Interrupt Preemption | 2,230,620 | 79,287 | 3.55% |
+| Message Processing | 14,511,761 | 349,668 | 2.41% |
+| Synchronization | 19,393,944 | 1,014,347 | 5.23% |
+| Memory Allocation | 5,358,376,202 | 4,297,447 | 0.08% |
+
+### 2) qemu + axvisor + freertos(guest)
+
+数据来源：`benchmark-comparison-noload(1).md`，FreeRTOS 作为 Axvisor guest 运行，noload 条件，每项 30 秒、6 轮。
+
+| 测试项 | 平均值 | 标准差 | CV | 相对 QEMU 效率 |
+| --- | --- | --- | --- | --- |
+| Basic Processing | 4,408,290 | 517 | 0.01% | 基准 |
+| Cooperative Scheduling | 15,464,760 | 149,777 | 0.97% | 95.0% |
+| Preemptive Scheduling | 2,090,820 | 17,094 | 0.82% | 94.1% |
+| Interrupt Processing | 2,090,643 | 14,433 | 0.69% | 93.9% |
+| Interrupt Preemption | 2,114,955 | 9,223 | 0.44% | 95.2% |
+| Message Processing | 14,099,635 | 195,310 | 1.39% | 97.5% |
+| Synchronization | 18,899,591 | 336,843 | 1.78% | 97.9% |
+| Memory Allocation | 5,334,546,706 | 1,859,123 | 0.03% | 99.9% |
+
+这组数据的作用不是证明 Axvisor guest 比直接 QEMU 更快，而是说明“把完整 RTOS 作为普通 guest 运行”会把调度和中断路径继续放在虚拟化链路里：调度、中断和抢占项仍有约 4% 到 6% 的虚拟化开销。对于 8ms 双轮足平衡控制，这类开销和抖动会直接进入控制周期预算。
+
+
+### 3)qemu + axvisor(amp方案)
+[Task Switch] n=1000 avg=5263 min=3600 max=212900 jitter=209300 ns
+[preemption] n=1000 avg=4271 min=2800 max=202700 jitter=199900 ns
+[IRQ Latency] n=500 avg=2859 min=1500 max=52200 jitter=50700 ns
+[Tick Delta] n=500 avg=999907 min=957500 max=1007600 jitter=50100 ns (expected=1000000 ns)
+[Sem Shuffle] n=1000 avg=4602 min=2900 max=180000 jitter=177100 ns
+
+### 4)rk3588 + axvisor(amp方案)
+[Task Switch] n=1000 avg=1066 min=875 max=1458 jitter=583 ns
+[preemption] n=1000 avg=1023 min=875 max=1459 jitter=584 ns
+[IRQ Latency] n=500 avg=654 min=292 max=2792 jitter=2500 ns
+[Tick Delta] n=500 avg=999999 min=998083 max=1002167 jitter=4084 ns (expected=1000000 ns)
+[Sem Shuffle] n=1000 avg=1022 min=875 max=1167 jitter=292 ns
+
+![QEMU 环境三种实时路径对比](assets/amp-qemu-three-way.svg)
+
+![RK3588 真机 Axvisor AMP 实测数据](assets/amp-rk3588-realtime.svg)
+
+展示结论：第一张图把 QEMU 直接运行 RTOS、QEMU 运行 Axvisor+RTOS guest、QEMU 运行 Axvisor AMP 三种方案放在一起看。直接 RTOS 是性能基线；RTOS guest 仍保留 93.9% 到 99.9% 的基线效率，但调度、中断和抢占路径仍在虚拟化链路里；AMP 方案不再把高频控制闭环放进 guest，而是在 Axvisor 侧保留实时执行路径，QEMU 下任务切换、抢占、中断和信号量平均耗时处于 2.859us 到 5.263us 区间。第二张图只展示 RK3588 真机 Axvisor AMP 结果：任务切换、抢占和信号量平均耗时约 1us，中断平均耗时约 0.654us，tick jitter 约 4.084us，只占 8ms 双轮足控制周期的约 0.051%。因此 AMP 的优势不是让通用 guest 跑分超过裸 RTOS，而是让高频实时控制绕开 guest/vCPU/虚拟中断路径，把 AI 和普通系统负载限制在低频命令输入侧。
+
+
+
+
 ### 3.1 实测记录
 
 | 场景 | 平台 | 命令或用例 | 关键结果 | 日志位置 | 备注 |

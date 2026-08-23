@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="720" viewBox="0 0 1180 720" role="img" aria-labelledby="title desc">
+  <title id="title">QEMU realtime path comparison</title>
+  <desc id="desc">Comparison of direct QEMU RTOS, QEMU Axvisor RTOS guest, and QEMU Axvisor AMP realtime path.</desc>
+  <rect width="1180" height="720" fill="#f8fafc"/>
+  <text x="42" y="50" font-family="Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a">QEMU 三种实时路径对比：AMP 把控制闭环移出 Guest</text>
+  <text x="42" y="82" font-family="Arial, sans-serif" font-size="15" fill="#475569">直接 RTOS 与 RTOS guest 使用 Thread-Metric 归一化效率；AMP 使用 Rhealstone-style 平均耗时。二者量纲不同，图中突出路径差异和实时控制落点。</text>
+
+  <g font-family="Arial, sans-serif">
+    <rect x="50" y="120" width="330" height="190" rx="18" fill="#e0f2fe" stroke="#0284c7" stroke-width="2"/>
+    <text x="78" y="154" font-size="21" font-weight="700" fill="#075985">1. QEMU 直接跑 RTOS</text>
+    <text x="78" y="188" font-size="15" fill="#0f172a">FreeRTOS 直接运行</text>
+    <text x="78" y="216" font-size="15" fill="#0f172a">作为性能基线：100%</text>
+    <text x="78" y="244" font-size="15" fill="#0f172a">控制路径不经过 hypervisor</text>
+    <text x="78" y="276" font-size="14" fill="#475569">用途：基准参考，不提供虚拟化隔离</text>
+
+    <rect x="425" y="120" width="330" height="190" rx="18" fill="#fff7ed" stroke="#f97316" stroke-width="2"/>
+    <text x="453" y="154" font-size="21" font-weight="700" fill="#9a3412">2. Axvisor + RTOS Guest</text>
+    <text x="453" y="188" font-size="15" fill="#0f172a">FreeRTOS 作为 VM 运行</text>
+    <text x="453" y="216" font-size="15" fill="#0f172a">效率保留：93.9% - 99.9%</text>
+    <text x="453" y="244" font-size="15" fill="#0f172a">调度/中断仍经过 vCPU 与虚拟 IRQ</text>
+    <text x="453" y="276" font-size="14" fill="#475569">问题：虚拟化抖动仍进入高频控制周期</text>
+
+    <rect x="800" y="120" width="330" height="190" rx="18" fill="#ecfdf5" stroke="#16a34a" stroke-width="2"/>
+    <text x="828" y="154" font-size="21" font-weight="700" fill="#14532d">3. Axvisor AMP</text>
+    <text x="828" y="188" font-size="15" fill="#0f172a">实时任务在 AMP 路径运行</text>
+    <text x="828" y="216" font-size="15" fill="#0f172a">QEMU 平均 RT 开销：2.859us - 5.263us</text>
+    <text x="828" y="244" font-size="15" fill="#0f172a">AI/guest 只下发低频目标命令</text>
+    <text x="828" y="276" font-size="14" fill="#475569">优势：高频控制闭环绕开 guest 调度路径</text>
+  </g>
+
+  <text x="60" y="365" font-family="Arial, sans-serif" font-size="21" font-weight="700" fill="#0f172a">RTOS guest 相对直接 RTOS 的效率保留率</text>
+  <line x1="280" y1="395" x2="280" y2="610" stroke="#cbd5e1"/>
+  <line x1="280" y1="610" x2="850" y2="610" stroke="#cbd5e1"/>
+  <line x1="565" y1="395" x2="565" y2="610" stroke="#e2e8f0" stroke-dasharray="4 4"/>
+  <line x1="850" y1="395" x2="850" y2="610" stroke="#e2e8f0" stroke-dasharray="4 4"/>
+  <g font-family="Arial, sans-serif" font-size="13" fill="#64748b" text-anchor="middle">
+    <text x="280" y="635">0%</text>
+    <text x="565" y="635">50%</text>
+    <text x="850" y="635">100%</text>
+  </g>
+  <g font-family="Arial, sans-serif" font-size="14" fill="#0f172a">
+    <text x="60" y="419">Cooperative Scheduling</text>
+    <text x="60" y="454">Preemptive Scheduling</text>
+    <text x="60" y="489">Interrupt Processing</text>
+    <text x="60" y="524">Interrupt Preemption</text>
+    <text x="60" y="559">Message Processing</text>
+    <text x="60" y="594">Synchronization</text>
+  </g>
+  <g fill="#f97316">
+    <rect x="280" y="400" width="542" height="20" rx="5"/>
+    <rect x="280" y="435" width="537" height="20" rx="5"/>
+    <rect x="280" y="470" width="535" height="20" rx="5"/>
+    <rect x="280" y="505" width="543" height="20" rx="5"/>
+    <rect x="280" y="540" width="556" height="20" rx="5"/>
+    <rect x="280" y="575" width="558" height="20" rx="5"/>
+  </g>
+  <g font-family="Arial, sans-serif" font-size="13" font-weight="700" fill="#0f172a">
+    <text x="832" y="416">95.0%</text>
+    <text x="827" y="451">94.1%</text>
+    <text x="825" y="486">93.9%</text>
+    <text x="833" y="521">95.2%</text>
+    <text x="846" y="556">97.5%</text>
+    <text x="848" y="591">97.9%</text>
+  </g>
+
+  <rect x="910" y="375" width="220" height="235" rx="16" fill="#dcfce7" stroke="#16a34a"/>
+  <text x="932" y="410" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#14532d">QEMU AMP 平均耗时</text>
+  <g font-family="Arial, sans-serif" font-size="15" fill="#0f172a">
+    <text x="932" y="448">Task Switch: 5.263us</text>
+    <text x="932" y="482">Preemption: 4.271us</text>
+    <text x="932" y="516">IRQ Latency: 2.859us</text>
+    <text x="932" y="550">Sem Shuffle: 4.602us</text>
+    <text x="932" y="584" fill="#14532d" font-weight="700">控制闭环不再放在 guest 中</text>
+  </g>
+</svg>
