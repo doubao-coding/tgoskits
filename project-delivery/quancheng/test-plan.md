@@ -269,15 +269,77 @@ python3 scripts/test/guest-ip-link/aggregate_metrics.py <guest.log>
 
 ### 4.10 实测记录与证据归档
 
-| 用例/场景 | 平台与提交 | 请求/成功 | app errors | 传输失败 | attempts | reconnects/recovery | RTT/P50/P95 | 有效 B/s | 日志/SHA-256 | 结论 |
-| --- | --- | ---: | ---: | ---: | ---: | --- | --- | ---: | --- | --- |
-| E01 网络与 listener | 待填写 | — | — | — | — | — | — | — | 待填写 | 待填写 |
-| E02 单请求闭环 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 |
-| E03 100 请求序列 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 |
-| F03 首次断连恢复 | host mock / 待填写 commit | 1/1 | 0 | 1 | 2 | 1/1 | 从日志归档 | 从日志归档 | 待填写 | 已具备确定性入口 |
-| 30×100 正常基线 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 | 待填写 |
+本节记录 2026-08-23 UTC 在实现提交 `2a891bbe949f59c7bfd037107b3615de4f57c704` 上的复测。宿主为 x86_64 Linux `4.19.90-89.11.v2401.ky10`，QEMU 10.0.11，Rust 1.99.0-nightly，GCC 14.2.0，Python 3.13.5。完整的关键输出和产物指纹见 [`assets/task2-test-evidence-20260823.md`](assets/task2-test-evidence-20260823.md)。
 
-每份交付记录至少包含：用例 ID、commit、QEMU/host/工具链版本、rootfs SHA-256、完整命令、输入或故障点、期望与实测结果、退出码、原始日志路径及 SHA-256、执行时间和复测人。不得用 host mock 的 RTT 作为双 guest 性能数据，也不得填写无法从归档日志复核的固定 P50/P95。
+#### 4.10.1 构建、静态质量与底座单测
+
+| ID | 命令 | 实测结果 | 耗时 | 结论 |
+| --- | --- | --- | ---: | --- |
+| S01 | `cargo test -p guest-ip-protocol` | 单元测试 5/5、doc-test 0/0；无失败、忽略或过滤 | 332 ms | PASS |
+| S02 | `cargo clippy -p guest-ip-protocol --all-targets -- -D warnings` | 退出码 0，无 warning | 255 ms | PASS |
+| S03 | `cargo check -p arceos-guest-ip-server --no-default-features` | ArceOS server 及依赖检查完成，退出码 0 | 867 ms | PASS |
+| S04 | `cargo clippy -p arceos-guest-ip-server --no-default-features --all-targets -- -D warnings` | 退出码 0，无 Clippy warning | 1,972 ms | PASS |
+| S05 | `cc -std=c11 -Wall -Wextra -Werror -O2 linux-client.c` | C11 编译退出码 0，`-Werror` 下无告警 | 65 ms | PASS |
+| S06 | `python3 -m py_compile scripts/test/guest-ip-link/*.py` | 三个 Python 验证脚本语法检查退出码 0 | 22 ms | PASS |
+| N01 | `cargo test -p axvirtio-net` | switch 单测 14/14、设备集成测试 18/18，共 32/32 | 3,799 ms | PASS |
+| B01 | `cargo test -p axvirtio-blk` | crate 单测 3/3、集成测试 34/34、doc-test 1/1，共 38/38 | 910 ms | PASS |
+
+`axvirtio-net` 的通过项实际覆盖固定端口注册、重复注册拒绝、广播/多播 fan-out、已知与未知单播、无 uplink 路径、源 MAC anti-spoof、inactive/stale generation 丢弃、端口注销，以及 VirtIO-net TX/RX、描述符权限、feature negotiation、ACK 与 reset。这里的 32/32 是二层交换机和设备模型的确定性证据，不等同于 StarryOS/ArceOS 的 IPv4/TCP 运行证据。
+
+#### 4.10.2 F03 首次断连恢复实测
+
+| 平台 | 请求/成功 | app errors | 传输失败 | attempts | reconnects/recovery | RTT/P50/P95 | 有效吞吐 | 验证器 | 结论 |
+| --- | ---: | ---: | ---: | ---: | --- | --- | ---: | --- | --- |
+| x86_64 host mock peer + 真实 C client | 1/1 | 0 | 1 | 2 | 1/1 | 84,449 / 84,449 / 84,449 ns | 94,731 B/s | verifier=0；aggregator=0 | PASS |
+
+服务端第一次 `accept` 后主动关闭连接，第二次连接返回合法 STATUS。客户端以同一 sequence 重试，最终输出：
+
+```text
+GIPC_STARRY_STATUS seq=1 payload=8 attempts=2 timeouts=1
+GIPC_STARRY_METRIC requests=1 success=1 success_rate=1 errors=0 timeouts=1 attempts=2 reconnects=1 recovery=1 rtt_ns=84449 throughput_bps=94731
+GIPC_METRICS_OK
+GIPC_AGGREGATE requests=1 success=1 success_rate=1.000000 app_errors=0 timeouts=1 reconnects=1 recoveries=1 rtt_p50_ns=84449 rtt_p95_ns=84449 throughput_avg_bps=94731
+```
+
+原始恢复日志 SHA-256 为 `a9ee4f39a51b75051f7dd12522ab8bcd49299e0afe82f1ece1153ec4dd819137`。该 RTT 和吞吐仅用于验证客户端计时、重试和聚合逻辑，不作为双 guest 性能数据。
+
+#### 4.10.3 StarryOS/ArceOS 双 guest QEMU 实测
+
+本轮先通过 `cargo xtask starry rootfs --arch aarch64` 获取并校验 Alpine AArch64 rootfs，再构建 StarryOS、ArceOS server 和 AArch64 静态 C client。产物如下：
+
+| 产物 | SHA-256 | 结果 |
+| --- | --- | --- |
+| StarryOS `starryos.bin` | `1ab3c90f33ac178e3fda1c6992ca76b164b4d7c2c91d22c52c97d5165cede633` | AArch64 构建成功 |
+| ArceOS guest server ELF | `ba5da5abf48a32199c8e4fd7b64c4e9026573ccbbfa545fede23c0842dbfab64` | AArch64 release 构建成功 |
+| StarryOS client ELF | `e4b16fdce3c7821df320dcf77804a56f576676a3171d48bd48747d6a56d53922` | ELF64 AArch64、静态链接 |
+| 注入前 rootfs | `b2e31e1c45d54a2a6b08f8830f1cd85868e3cf02fe647c2dc4673b4f98c2fd4e` | 镜像校验与准备成功 |
+
+QEMU 使用 4 vCPU/4 GiB 启动 Axvisor，日志确认 `VM[1] boot success` 与 `VM[2] boot success`。随后 StarryOS 在网络初始化之前触发：
+
+```text
+[VM 1] panic
+[VM 1] failed to determine root device from available block devices
+=== FAIL PATTERN MATCHED: (?i)panic
+```
+
+runner 正确以退出码 1 结束，总耗时 20,007 ms；完整 QEMU 日志 SHA-256 为 `f8598c33909a424b30de00547dad32d6b12c4fa5fe426a0390af0664faf2c3a2`。本轮没有出现 `GIPC_RTOS_READY`、`GIPC_RTOS_LISTEN`、`GIPC_STARRY_NET_READY`、`GIPC_STARRY_STATUS` 或 `GIPC_STARRY_METRIC`，因此不能从该轮生成双 guest 请求成功率、RTT 或有效吞吐量。
+
+| 用例 | 实际到达阶段 | 请求/成功 | 指标结果 | 结论 |
+| --- | --- | ---: | --- | --- |
+| E01 网络与 listener | Axvisor 及两个 guest 内核均启动；StarryOS rootfs 初始化失败，未进入网络脚本 | 0/0 | 无业务 metric | FAIL：未达到 LISTEN/NET_READY |
+| E02 单请求闭环 | 前置 E01 未通过 | 0/0 | 不生成虚假 RTT/吞吐 | NOT RUN：被 E01 阻断 |
+| E03 100 请求序列 | 前置 E01 未通过 | 0/0 | 不生成虚假成功率/P50/P95 | NOT RUN：被 E01 阻断 |
+| 30×100 正常基线 | 前置 E01 未通过 | 0/0 | 无双 guest 性能样本 | NOT RUN：被 E01 阻断 |
+
+#### 4.10.4 复测发现与总体判定
+
+| 编号 | 复测发现 | 证据与影响 | 修复后的回归要求 |
+| --- | --- | --- | --- |
+| T2-D01 | runner 的 ArceOS `llvm-objcopy` 输入仍指向 `target/aarch64-unknown-none-softfloat`，当前 `xtask` 实际产物位于 `target/aarch64-unknown-linux-musl` | 原脚本在 QEMU 前退出；本轮用临时产物映射继续测试 | runner 应从 `xtask` 构建结果取得实际 ELF 路径，并在干净工作区直接启动 QEMU |
+| T2-D02 | Starry VM 配置只有 `virtio-net`，没有可供 StarryOS 挂载 rootfs 的块设备 | 两个 VM 均进入内核后，VM1 报 `failed to determine root device` 并停机 | 补齐与 StarryOS 块驱动匹配的 rootfs 设备，确认 `/usr/bin/gipc-starry-client` 可见后重跑 E01–E03 |
+| T2-D03 | runner 默认用宿主 `cc` 构建被注入的客户端 | x86_64 宿主会生成错误架构程序；本轮通过 `GIPC_STARRY_CLIENT_BIN` 注入 AArch64 静态 ELF | runner 应显式交叉编译或校验 ELF `Machine: AArch64`，拒绝宿主架构产物 |
+
+截至本轮复测，协议、二层交换、VirtIO 设备模型、客户端有限重连、指标验证和聚合入口均通过；Axvisor 与两个 guest 内核能够启动，但 StarryOS rootfs 设备装配阻断了 IPv4/TCP/GIPC 业务闭环。因此任务二当前测试结论为“底层自动化通过，双 guest 业务验收未通过”，不能用 host mock 的 `84,449 ns` 和 `94,731 B/s` 代替双 guest 性能数据。修复 T2-D01～T2-D03 后，必须重新获得 LISTEN→NET_READY→STATUS→METRIC 完整 marker，并执行 100 请求及 30×100 样本聚合，才能把任务二整体状态改为 PASS。
 
 ## 5. 任务三：AI 联动应用测试
 
