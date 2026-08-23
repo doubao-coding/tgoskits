@@ -89,11 +89,42 @@
 
 | 场景 | 平台 | 命令或用例 | 关键结果 | 日志位置 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| 模型加载与样例推理 | 待补 | 待补 | 待补 | 待补 | 任务三 |
+| 模型加载与样例推理 | OrangePi 5 Plus（axvisor + starry guest，vCPU 绑定 A76 大核，板级日志 Error 档） | SenseVoice 语音识别（RK3588 NPU，librknnrt + fp16-scaled 模型），zh/en 参考 wav 各一条 | zh.wav 转写通过（fp16 精度边缘：`开放时早九点至下午五点`，参考文本 `开饭时间早上九点至下午五点`）；单条推理 1.46s、模型加载 30.62s（动态调频组＝交付配置，PR #2165 修复 governor 拓扑归因后实测：SD 冷读 29.82s，16.4 MB/s；rknn_init 0.50s）；同构建静态 1200 MHz 组推理 1.72s、加载 26.30s（冷读 25.41s，19.2 MB/s，HighSpeed 总线 78%），两组对比见 §5.3；NPU submit 7.78 ms/次，达原生 Linux 水平（约 7.5 ms） | 串口 `[perf]` 分项计时（read model / rknn_init / 推理秒数）与内核 `[perf] rknpu <kind> ioctl stat` 聚合 | 任务三；提交默认日志档为 Warn（保留 `[perf]` 聚合），上表数字取 Error 档实测 |
 | 推理结果到控制动作 | 待补 | 待补 | 待补 | 待补 | 任务三 |
 | 状态回传闭环 | 待补 | 待补 | 待补 | 待补 | 任务三 |
 | 负载下端到端闭环 | 待补 | 待补 | 待补 | 待补 | 任务三 |
 | 语音控制双轮足机器人 | Orange Pi 5 Plus + 双轮足机器人 | `assets/control_voice.wav` + StarryOS SenseVoice/RKNN + RT wheel task | 语音命令转换为有限动作集合，机器人完成对应运动并在超时后可停止 | `assets/video.mp4`、`assets/control_voice.wav`、`assets/minicom_output.jpg` | 任务三 |
+
+### 5.3 原始数据与对比图
+
+三配置板级实测的串口原始输出（同一 zh.wav，日志 Error 档）：
+
+```text
+# 原生 Linux（Rockchip rknpu 驱动，页缓存热读）
+[perf] model load: 0.65s
+{"wav": "/opt/sensevoice/testwavs/zh.wav", "text": "开放时早九点至下午五点", "seconds": 1.0377981662750244}
+
+# starry-no-op（优化前：A55 小核、Info 日志）
+[perf] model load: 41.23s
+{"wav": "/opt/sensevoice/testwavs/zh.wav", "text": "开放时早九点至下午五点", "seconds": 2.9593342909999905}
+
+# starry-opt-nolog-dynamic-v3（优化后：vCPU 绑定 A76 大核 + Error 日志 + governor 拓扑归因修复，动态调频）
+[perf] read model: 29.82s (490649722 bytes)
+[perf] rknn_init: 0.50s
+[perf] model load: 30.62s
+{"wav": "/opt/sensevoice/testwavs/zh.wav", "text": "开放时早九点至下午五点", "seconds": 1.464541749999995}
+```
+
+上面两组均为 Error 档、同一优化构建，差别只在调频策略：`starry-opt-nolog-dynamic-v3`
+叠加了 PR #2165 的 governor 拓扑归因修复（动态调频）。同构建在静态 1200 MHz
+（调频不介入）下为 `read model: 25.41s`、`rknn_init: 0.66s`、`model load: 26.30s`、
+推理 `1.7202s`。动态组推理更快（1.46s vs 1.72s，推理期大核可升频），代价是突发
+I/O 间隙会把大核降档、SD 冷读略慢（29.82s vs 25.41s）。交付配置取动态组，
+静态组数据用于说明调频策略的取舍。
+三配置转写文本一致（fp16 精度边缘，均输出 `开放时早九点至下午五点`，
+参考文本 `开饭时间早上九点至下午五点`）。
+
+![SenseVoice 推理与模型加载性能对比](assets/sensevoice-perf.svg)
 
 ## 6. 综合指标记录
 
@@ -101,6 +132,6 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 控制侧周期任务延迟 | 任务一 | 待补 | 待补 | 待补 | 待补 | 待补 | 待补 |
 | 客户机通信 RTT | 任务二 | 待补 | 待补 | 待补 | 待补 | 待补 | 待补 |
-| AI 推理耗时 | 任务三 | 待补 | 待补 | 待补 | 待补 | 待补 | 待补 |
+| AI 推理耗时 | 任务三 | OrangePi 5 Plus guest（A76 大核，日志 Error 档） | 1.46s/条（约 5.6s 音频，动态调频） | 待补 | 待补 | 8.76s（优化前 A55 小核 + Info 日志） | 串口 `[perf]` 与 `[perf] rknpu submit ioctl stat` |
 | AI 到控制闭环总耗时 | 任务三 | 待补 | 待补 | 待补 | 待补 | 待补 | 待补 |
 | 双轮足控制周期 | 任务一/任务三 | Orange Pi 5 Plus | 8ms 目标周期 | 待补 | 待补 | 待补 | 串口日志 / `assets/minicom_output.jpg` |
