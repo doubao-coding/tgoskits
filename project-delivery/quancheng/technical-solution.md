@@ -100,35 +100,85 @@ Axvisor 作为二者之下的虚拟化底座，负责把两类客户机放在同
 
 ### 3.1 任务目标
 
-任务一目标是在同一虚拟化平台上为智能侧和控制侧客户机提供稳定、隔离、可测的运行底座。该任务不只关注“能启动”，还关注并发负载下的控制侧响应时延、中断处理路径、定时器行为、vCPU 分配、内存隔离和异常隔离。
+任务一目标是在同一虚拟化平台上为智能侧和控制侧客户机提供稳定、隔离、可测的运行底座。该任务不只关注“能启动”，还关注并发负载下的控制侧响应时延、vCPU 与物理 CPU 的隔离关系、ArceOS 任务调度语义以及实时任务等待锁时的优先级反转问题。
+
+本次任务一由三个已提交 PR 分层完成。#2160 位于 Axvisor 和 ArceOS runtime 边界，解决实时 CPU 预留和客户机隔离运行的问题；#2161 位于 `ax-sched` 和 `axtask` 边界，提供单核实时 FIFO 调度能力；#2162 基于 #2161，在 `axtask` mutex 路径中实现优先级继承，避免高优先级控制任务因为低优先级持锁者被中优先级任务抢占而长期等待。
+
+| PR | 技术层次 | 核心目标 | 依赖关系 |
+| --- | --- | --- | --- |
+| [#2160](https://github.com/rcore-os/tgoskits/pull/2160) | 虚拟化与运行时隔离 | 为 Axvisor 保留实时 CPU，降低控制侧 vCPU 被普通负载干扰的风险 | 可独立合入 |
+| [#2161](https://github.com/rcore-os/tgoskits/pull/2161) | 调度器与 ArceOS 接入 | 增加单核 `sched-rt-fifo`，使高优先级任务先于低优先级任务运行 | 可独立合入 |
+| [#2162](https://github.com/rcore-os/tgoskits/pull/2162) | 同步原语与优先级继承 | 在 RT FIFO 基础上为 mutex 添加 priority inheritance | 必须基于 #2161，先合 #2161 再合 #2162 |
 
 ### 3.2 客户机资源配置方案
 
-客户机资源配置以 VM 配置文件为核心，描述每个客户机的 CPU 数量、内存区域、入口地址、镜像路径、设备列表和可访问外设。智能侧客户机侧重 AI 模型和用户态运行环境；控制侧客户机侧重控制任务、低抖动运行和必要外设访问。
+客户机资源配置以 VM 配置文件为核心，描述每个客户机的 CPU 数量、内存区域、入口地址、镜像路径、设备列表和可访问外设。智能侧客户机侧重 AI 模型和用户态运行环境；控制侧客户机侧重控制任务、低抖动运行和必要外设访问。#2160 在这一层补齐实时 CPU 预留能力，使 Axvisor 可以在 host 侧识别并保留专用于控制侧实时路径的 CPU 资源。
 
-在 QEMU 验证阶段，资源配置用于验证多客户机组合启动和基础运行。在板级验证阶段，资源配置与真实设备地址、中断号、内存布局以及可选直通设备对应。
+在 QEMU 验证阶段，资源配置用于验证多客户机组合启动和基础运行。在板级验证阶段，资源配置与真实设备地址、中断号、内存布局以及可选直通设备对应。实时 CPU 预留不是直接替代虚拟地址空间隔离，而是在已有 VM 内存和设备隔离之外增加 CPU 时间维度的隔离，避免智能侧计算密集负载长期占用控制侧关键路径所需的执行资源。
+
+| 配置或模块 | 职责 | 对任务一的作用 |
+| --- | --- | --- |
+| `os/axvisor/src/realtime.rs` | 管理 Axvisor 侧实时 CPU 预留语义 | 明确哪些 CPU 可作为控制侧实时资源 |
+| `os/arceos/modules/axruntime/build.rs` | 在构建阶段生成或传递运行时 CPU 信息 | 让 runtime 能识别实时 CPU 配置 |
+| `virtualization/axvm/build.rs` | 为 axvm host glue 提供构建期配置输入 | 将实时 CPU 信息传递到虚拟化组件 |
+| `virtualization/axvm/src/host/arceos.rs` | AxVM 与 ArceOS host 的适配层 | 让 VM/vCPU 管理能够消费 runtime 侧隔离信息 |
 
 ### 3.3 调度与关键路径优化方案
 
-实时性设计重点关注控制侧 vCPU 的调度确定性。控制侧 vCPU 可以与固定物理 CPU、优先级策略或更短调度路径结合，减少智能侧计算负载对控制侧的影响。智能侧 AI 推理任务的 CPU 占用和内存压力作为干扰源纳入测量范围。
+实时性设计重点关注控制侧 vCPU 和控制侧任务的调度确定性。#2161 在 `components/axsched/src/rt_fifo.rs` 中新增 `RtFifoScheduler`，用 `RtPriority::rt_priority()` 获取任务有效优先级，并以 `(Reverse(priority), enqueue_order)` 维护 ready queue。高优先级任务总是先于低优先级任务被选中；同优先级任务仍保持 FIFO 入队顺序，符合控制任务常见的实时 FIFO 语义。
 
-关键路径包括定时器触发、中断注入、虚拟设备处理、协议消息收发和控制任务唤醒。空载、通信负载、AI 推理负载和压力负载下的端到端时延共同反映隔离策略对控制侧的影响。
+该调度能力通过 `sched-rt-fifo` feature 接入 `axtask` 和 `ax-std`，默认 FIFO、RR 和 CFS 路径不被替换。当前实现明确限定在 `SMP=1`，因为多核实时调度还需要跨 CPU push/pull、远程抢占和任务迁移协议才能保证系统级最高优先级先运行。比赛任务一中，它先作为控制侧 ArceOS/RTOS 单核实时任务的调度底座。
+
+| 调度能力 | 代码锚点 | 验证方式 |
+| --- | --- | --- |
+| 高优先级优先 | `RtFifoScheduler::pick_next_task()` | `rt_fifo_picks_higher_priority_before_fifo_order` |
+| 同优先级 FIFO | `enqueue_order` 和 ready queue key | `rt_fifo_preserves_fifo_order_within_same_priority` |
+| ready task 改优先级后重排 | `RtFifoScheduler::set_priority()` | `rt_fifo_set_priority_reorders_ready_task` |
+| 默认优先级轮转判定 | `RtFifoScheduler::task_tick()` | `rt_fifo_tick_rotates_default_priority_runtime_tasks` |
+| ArceOS QEMU 集成 | `test-suit/arceos/rust/cases/sched-rt-fifo/` | `cargo xtask arceos test qemu --test-group rust --test-case sched-rt-fifo --target x86_64-unknown-none` |
 
 ### 3.4 中断、定时器与绑核设计
 
-虚拟化环境下，中断和定时器路径是实时性的重要影响因素。方案将虚拟中断控制器、虚拟本地 APIC/GIC、虚拟定时器和 vCPU 调度路径纳入统一分析范围。控制侧客户机的中断来源、共享设备中断和控制任务唤醒路径共同构成实时性分析对象。
+虚拟化环境下，中断、定时器和绑核路径是实时性的重要影响因素。#2160 先在 Axvisor 侧建立实时 CPU 预留边界，使控制侧 vCPU 可以与普通 vCPU 形成更清晰的资源隔离；#2161 再在控制侧 ArceOS 内部提供实时 FIFO 调度，让控制任务被唤醒后能够按优先级运行。
 
-在 x86 场景中，可结合 `components/x86_vlapic` 分析虚拟本地 APIC 定时器和中断注入路径；在 AArch64 场景中，可结合 `components/arm_vgic` 和板级配置分析虚拟中断控制器行为。绑核设计用于降低 vCPU 迁移带来的缓存扰动和调度不确定性。
+在 x86 场景中，可结合 `components/x86_vlapic` 分析虚拟本地 APIC 定时器和中断注入路径；在 AArch64 场景中，可结合 `components/arm_vgic` 和板级配置分析虚拟中断控制器行为。绑核设计用于降低 vCPU 迁移带来的缓存扰动和调度不确定性；RT FIFO 则处理已经进入控制侧客户机后的任务级优先级选择。
+
+```text
+Axvisor 实时 CPU 预留
+  -> 控制侧 vCPU 运行资源隔离
+  -> ArceOS sched-rt-fifo 选择高优先级控制任务
+  -> mutex PI 避免锁等待导致的优先级反转
+  -> 控制侧关键路径获得更稳定的执行机会
+```
 
 ### 3.5 隔离设计
 
-隔离设计包括内存隔离、CPU 时间隔离、设备访问隔离和故障隔离。内存隔离通过虚拟地址空间和 VM 配置限定每个客户机可访问范围；CPU 时间隔离通过 vCPU 配置、绑核或优先级策略降低互相干扰；设备访问隔离通过直通设备、虚拟设备和排除设备列表控制客户机访问边界；故障隔离要求单个客户机异常退出、重启或高负载运行时不破坏虚拟化底座和其他客户机。
+隔离设计包括内存隔离、CPU 时间隔离、设备访问隔离和同步路径隔离。内存隔离通过虚拟地址空间和 VM 配置限定每个客户机可访问范围；CPU 时间隔离通过 #2160 的实时 CPU 预留、vCPU 配置和绑核策略降低互相干扰；设备访问隔离通过直通设备、虚拟设备和排除设备列表控制客户机访问边界；同步路径隔离则由 #2162 补齐，避免控制侧高优先级任务在 mutex 争用中被普通任务间接阻塞。
 
-隔离能力的验证不只依赖源码说明，还应通过压力测试和异常注入形成证据。例如在智能侧执行 CPU/内存压力负载，同时持续测量控制侧周期任务延迟和通信响应时间。
+#2162 的 priority inheritance 不改变 VM 间内存隔离边界，它解决的是控制侧客户机内部的优先级反转。原有 `RawMutex` 只有 `owner_id` 和 wait queue，高优先级 waiter 阻塞时不会改变低优先级 owner 的调度地位；加入 PI 后，contended lock 会将 waiter 的 effective priority donation 给 owner，并在必要时触发 ready queue 重排，owner unlock 后再清理 donation。
+
+| PI 状态或函数 | 作用 | 隔离意义 |
+| --- | --- | --- |
+| `base_sched_priority` | 保存调用方设置的基础优先级 | donation 不覆盖用户配置 |
+| `donated_sched_priority` | 保存 mutex waiter 临时捐赠 | owner 可临时继承高优先级 |
+| `effective_sched_priority` | 调度器实际观察的优先级 | RT FIFO 能按 donation 后优先级排序 |
+| `mutex_wait_owner_id` | 记录当前任务等待的 owner | 支持 A 等 B、B 等 C 的链式传播 |
+| `requeue_task_after_priority_change()` | 重新插入 ready queue | priority 改变后调度顺序立即生效 |
+
+隔离能力的验证不只依赖源码说明，还应通过压力测试和异常注入形成证据。例如在智能侧执行 CPU/内存压力负载，同时持续测量控制侧周期任务延迟和通信响应时间；在控制侧内部构造低优先级 owner、高优先级 waiter 和中优先级干扰任务，验证中优先级任务不能长期阻止 owner 释放 mutex。
 
 ### 3.6 预期效果与边界
 
-任务一预期交付一套可复现的多客户机部署方案，能够说明客户机如何配置、资源如何隔离、关键路径如何测量，以及控制侧实时性如何不被智能侧负载显著破坏。边界上，方案不承诺替代硬实时认证系统，而是在比赛场景下提供可运行、可测量、可解释的混合系统实时性保障。
+任务一预期交付一套可复现的多客户机部署方案，能够说明客户机如何配置、资源如何隔离、关键路径如何测量，以及控制侧实时性如何不被智能侧负载显著破坏。#2160、#2161 和 #2162 分别从虚拟化 CPU 资源、客户机内部调度和 mutex 同步路径三个层次补齐实时性底座。
+
+当前边界需要明确记录：#2161 的 RT FIFO 只承诺单核调度语义，不承诺 SMP 全局实时调度；#2162 的 mutex PI 是 `sched-rt-fifo` 下的最小闭环，不等同于完整 POSIX `PTHREAD_PRIO_INHERIT`，也尚未实现 per-mutex waiter priority 重新计算、多锁 owner 的完整 donation 重算或 priority-aware wait queue。任务一的比赛价值在于形成可运行、可测量、可解释的实时性与隔离基础，而不是替代硬实时认证系统。
+
+| 验收关注点 | 已有证据 | 后续补强方向 |
+| --- | --- | --- |
+| Axvisor CPU 隔离 | #2160 的实时 CPU 预留设计与 host glue 接入 | 增加板级多负载下的 vCPU 延迟记录 |
+| RT FIFO 调度 | #2161 的 scheduler 单测和 ArceOS QEMU case | 增加多架构或板级控制任务验证 |
+| Mutex PI | #2162 的 QEMU PI 场景、clippy 和设计文档 | 补齐 per-mutex donation 重算和 priority-aware wait queue |
+| 与任务二/三衔接 | 控制侧运行底座支撑 GIPC 服务端和 AI 控制闭环 | 在端到端日志中加入控制侧实时延迟指标 |
 
 ## 4. 任务二：客户机通信与协议设计
 

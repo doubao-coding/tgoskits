@@ -10,11 +10,13 @@
 
 ## 2. 任务一：实时性与隔离底座 PR
 
-任务一相关 PR 主要体现虚拟化混合系统的底座能力，包括客户机资源配置、VM 启动、vCPU 管理、内存隔离、设备隔离、中断/定时器路径和实时性测试。
+任务一相关 PR 主要体现虚拟化混合系统的实时性与隔离底座能力。三项 PR 按依赖顺序组织：先为 Axvisor 保留控制侧实时 CPU，再在 ArceOS/axtask 中提供单核实时 FIFO 调度能力，最后在该调度能力之上补齐 mutex 优先级继承，避免高优先级控制任务被锁等待间接阻塞。
 
 | PR 编号/链接 | PR 标题 | 主要修改内容 | 涉及目录 | 测试或验证方式 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| 待补 | 待补 | 待补 | `os/axvisor/`、`components/`、`test-suit/axvisor/` | 待补 | 待补 |
+| [#2160](https://github.com/rcore-os/tgoskits/pull/2160) | `feat(axvisor): reserve realtime CPU` | 为 Axvisor 增加实时 CPU 预留与运行时识别能力，使虚拟化底座能够把控制侧关键 vCPU 与普通负载隔离开 | `os/axvisor/`、`os/arceos/modules/axruntime/`、`virtualization/axvm/`、`docs/design/axvisor-realtime-cpu.md` | Axvisor/ArceOS 构建路径、VM host 配置和实时 CPU 运行时记录验证 | 已提交到 `dev` |
+| [#2161](https://github.com/rcore-os/tgoskits/pull/2161) | `feat(ax-sched): add single-core RT FIFO scheduler` | 新增 `RtFifoScheduler`、`sched-rt-fifo` feature、ArceOS 单核 QEMU case 和调度器设计文档，为控制侧实时任务提供高优先级优先、同优先级 FIFO 的调度基础 | `components/axsched/`、`os/arceos/modules/axtask/`、`test-suit/arceos/rust/`、`docs/design/current-fifo-issues-and-improvements.md` | `cargo xtask arceos test qemu --test-group rust --test-case sched-rt-fifo --target x86_64-unknown-none`，调度器单测和 QEMU 成功 regex | 已提交到 `dev` |
+| [#2162](https://github.com/rcore-os/tgoskits/pull/2162) | `feat(axtask): add mutex priority inheritance` | 基于 #2161 的 RT FIFO 调度补齐 mutex 优先级继承，拆分 base/effective/donated priority，支持 owner donation、链式传播、ready queue 重排和 unlock cleanup | `os/arceos/modules/axtask/`、`components/axsched/`、`test-suit/arceos/rust/src/task/rt_fifo.rs`、`docs/design/axtask-priority-inheritance.md` | `cargo xtask clippy --package ax-task`、`cargo xtask clippy --package ax-sched`、`sched-rt-fifo` QEMU PI 场景验证 | 已提交到 `dev`，依赖 #2161 先合入 |
 
 ## 3. 任务二：客户机通信底座 PR
 
