@@ -2,7 +2,7 @@
 
 本目录用于集中存放“智能化工控中基于虚拟化的混合系统部署及联动实现”项目的比赛提交材料。材料围绕三项任务组织，但不做简单平铺，而是统一采用“底座 -> 链路 -> 应用”的叙事结构：
 
-- 任务一：实时性与隔离底座，提供虚拟化混合系统稳定运行、资源隔离和关键路径实时性保障。
+- 任务一：Axvisor 实时性与隔离底座，优化 Axvisor 自身的实时运行能力，为智能侧 guest 与预留实时 CPU 上的控制任务提供隔离保障。
 - 任务二：客户机通信底座，在隔离客户机之间建立可复现、可测试的 IP 通信和应用层协议链路。
 - 任务三：AI 联动应用，在前两项基础上完成智能侧推理、控制侧执行和状态回传的闭环展示。
 
@@ -29,7 +29,7 @@
 
 TGOSKits 仓库提供 ArceOS、StarryOS、Axvisor 及相关组件的统一开发与测试入口。本项目交付材料引用的主要代码与配置位置包括：
 
-- `os/axvisor/`：虚拟化运行时、板级配置和 VM 配置，是任务一实时性与隔离底座的主要落点。
+- `os/axvisor/`：虚拟化运行时、实时 CPU 预留、板级配置和 VM 配置，是任务一 Axvisor 自身实时性优化与隔离底座的主要落点。
 - `components/axvm`、`components/axvcpu`、`components/axdevice`、`components/axaddrspace`：虚拟机、vCPU、虚拟设备和地址空间等核心虚拟化组件。
 - `components/x86_vlapic`、`components/arm_vgic`：虚拟中断与定时器相关组件，可支撑任务一中的时延与中断路径分析。
 - `test-suit/axvisor/`：Axvisor QEMU、U-Boot 与板级测试入口。
