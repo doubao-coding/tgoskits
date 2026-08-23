@@ -100,103 +100,47 @@ Axvisor 作为统一底座，负责把智能侧 guest 与实时侧 CPU 放在同
 
 ### 3.1 任务目标
 
-任务一目标是优化 Axvisor 自身的实时性，使同一平台上的智能侧 guest、虚拟设备 I/O 和实时侧控制任务能够稳定共存。该任务不只关注“能启动”，还关注 Axvisor 在并发负载下的实时 CPU 预留、智能侧 vCPU 与预留物理 CPU 的隔离关系、中断与定时器路径、板级设备访问和调频策略对 8ms 控制闭环的影响。
+任务一的目标是为同一硬件上的智能侧 guest 和实时控制任务建立可解释、可验证的隔离底座。智能侧需要运行 StarryOS、Python、NPU 推理、文件系统和网络协议等通用负载；控制侧则需要稳定执行双轮足机器人的 8ms 平衡闭环。两类负载的实时性要求不同，不能简单把控制任务放进普通 guest 中再依赖虚拟化调度来兜底。
 
-本次任务一以 Axvisor 运行时为主线分层完成。#2160 位于 Axvisor 和 runtime 边界，解决实时 CPU 预留和 AMP 隔离运行的问题，是任务一的核心；#2163、#2164 和 #2165 从 Axvisor 的块设备启动、板级 SD 主机和 RK3588 调频归因补齐底座能力，降低 guest 加载、I/O 和频率管理对实时路径的扰动；#2161 和 #2162 提供预留 CPU 上实时任务的调度与锁等待支撑，但不再把任务一表述为“启动一个控制侧 guest OS 并优化其内部调度”。
+因此，任务一先验证三种实时承载方式的差异，再确定 AMP 作为最终方案：智能侧仍作为 Axvisor guest 运行，实时侧由 Axvisor 预留 CPU 直接承载关键控制路径。该目标对应两个层次的能力建设：Axvisor 层要提供实时 CPU 预留和隔离；ArceOS/实时任务层要补齐 RT FIFO 调度和 mutex 优先级继承，避免控制任务在本地调度和锁等待中被普通任务拖慢。
 
-| PR | 技术层次 | 核心目标 | 依赖关系 |
-| --- | --- | --- | --- |
-| [#2160](https://github.com/rcore-os/tgoskits/pull/2160) | Axvisor 实时 CPU 预留 | 为 Axvisor 保留实时 CPU，降低实时控制路径被智能侧 guest 和普通负载干扰的风险 | 任务一核心 |
-| [#2163](https://github.com/rcore-os/tgoskits/pull/2163) | Axvisor guest 启动与块设备路径 | 增加 IRQ 驱动 virtio-blk 和 Starry guest smoke，降低启动与块 I/O 路径不确定性 | 底座支撑 |
-| [#2164](https://github.com/rcore-os/tgoskits/pull/2164) | Axvisor 板级 SD 主机启用 | 使 OrangePi 5 Plus 上 Axvisor 能从 SD 文件系统加载 guest 镜像 | 板级支撑 |
-| [#2165](https://github.com/rcore-os/tgoskits/pull/2165) | RK3588 调频归因修复 | 按 FDT CPU topology 归因 guest busy，避免实时相关 CPU 簇被错误降频 | 板级实时性支撑 |
-| [#2161](https://github.com/rcore-os/tgoskits/pull/2161) | 实时任务调度支撑 | 增加单核 `sched-rt-fifo`，使预留 CPU 上高优先级任务先于低优先级任务运行 | 组件支撑 |
-| [#2162](https://github.com/rcore-os/tgoskits/pull/2162) | 同步原语与优先级继承 | 在 RT FIFO 基础上为 mutex 添加 priority inheritance，降低锁等待导致的间接阻塞 | 组件支撑 |
+### 3.2 验证 bare、guest 与 AMP 方案实时性差异
 
-### 3.2 智能侧 VM 与实时 CPU 配置方案
-
-智能侧资源配置仍以 VM 配置文件为核心，描述 guest 的 CPU 数量、内存区域、入口地址、镜像路径、设备列表和可访问外设。实时侧不再建模为另一个控制侧 guest，而是由 Axvisor 识别并保留专用于控制路径的物理 CPU，直接承载 8ms 控制闭环和必要外设访问。#2160 在这一层补齐实时 CPU 预留能力，使 Axvisor 可以在 host 侧识别并保留专用于实时侧控制路径的 CPU 资源。
-
-在 QEMU 验证阶段，资源配置用于验证智能侧 guest 启动、虚拟设备和基础运行。在板级验证阶段，资源配置与真实设备地址、中断号、内存布局以及实时侧可访问外设对应。实时 CPU 预留不是直接替代虚拟地址空间隔离，而是在已有 VM 内存和设备隔离之外增加 CPU 时间维度的隔离，避免智能侧计算密集负载长期占用实时控制关键路径所需的执行资源。
-
-| 配置或模块 | 职责 | 对任务一的作用 |
-| --- | --- | --- |
-| `os/axvisor/src/realtime.rs` | 管理 Axvisor 侧实时 CPU 预留语义 | 明确哪些 CPU 可作为控制侧实时资源 |
-| `os/arceos/modules/axruntime/build.rs` | 在构建阶段生成或传递运行时 CPU 信息 | 让 runtime 能识别实时 CPU 配置 |
-| `virtualization/axvm/build.rs` | 为 axvm host glue 提供构建期配置输入 | 将实时 CPU 信息传递到虚拟化组件 |
-| `virtualization/axvm/src/host/arceos.rs` | AxVM 与 ArceOS host 的适配层 | 让 VM/vCPU 管理能够消费 runtime 侧隔离信息 |
-
-### 3.3 调度与关键路径优化方案
-
-实时性设计重点关注预留实时 CPU 上控制任务的调度确定性。#2161 在 `components/axsched/src/rt_fifo.rs` 中新增 `RtFifoScheduler`，用 `RtPriority::rt_priority()` 获取任务有效优先级，并以 `(Reverse(priority), enqueue_order)` 维护 ready queue。高优先级任务总是先于低优先级任务被选中；同优先级任务仍保持 FIFO 入队顺序，符合控制任务常见的实时 FIFO 语义。
-
-该调度能力通过 `sched-rt-fifo` feature 接入 `axtask` 和 `ax-std`，默认 FIFO、RR 和 CFS 路径不被替换。当前实现明确限定在 `SMP=1`，因为多核实时调度还需要跨 CPU push/pull、远程抢占和任务迁移协议才能保证系统级最高优先级先运行。比赛任务一中，它先作为预留实时 CPU 上单核实时任务的调度底座。
-
-| 调度能力 | 代码锚点 | 验证方式 |
-| --- | --- | --- |
-| 高优先级优先 | `RtFifoScheduler::pick_next_task()` | `rt_fifo_picks_higher_priority_before_fifo_order` |
-| 同优先级 FIFO | `enqueue_order` 和 ready queue key | `rt_fifo_preserves_fifo_order_within_same_priority` |
-| ready task 改优先级后重排 | `RtFifoScheduler::set_priority()` | `rt_fifo_set_priority_reorders_ready_task` |
-| 默认优先级轮转判定 | `RtFifoScheduler::task_tick()` | `rt_fifo_tick_rotates_default_priority_runtime_tasks` |
-| ArceOS QEMU 集成 | `test-suit/arceos/rust/cases/sched-rt-fifo/` | `cargo xtask arceos test qemu --test-group rust --test-case sched-rt-fifo --target x86_64-unknown-none` |
-
-### 3.4 中断、定时器与绑核设计
-
-虚拟化环境下，中断、定时器和绑核路径是实时性的重要影响因素。#2160 先在 Axvisor 侧建立实时 CPU 预留边界，使实时控制任务可以与智能侧普通 vCPU 形成更清晰的资源隔离；#2161 再为实时任务提供 FIFO 调度，让控制任务被唤醒后能够按优先级运行。
-
-在 x86 场景中，可结合 `components/x86_vlapic` 分析虚拟本地 APIC 定时器和中断注入路径；在 AArch64 场景中，可结合 `components/arm_vgic` 和板级配置分析虚拟中断控制器行为。绑核设计用于降低智能侧 vCPU 迁移带来的缓存扰动和调度不确定性；RT FIFO 则处理预留实时 CPU 上的任务级优先级选择。
-
-```text
-Axvisor 实时 CPU 预留
-  -> 实时控制任务与智能侧 vCPU 隔离
-  -> sched-rt-fifo 选择高优先级控制任务
-  -> mutex PI 避免锁等待导致的优先级反转
-  -> 实时控制关键路径获得更稳定的执行机会
-```
-
-### 3.5 实测对比与 AMP 优势
-
-任务一的实测对比采用两层口径：先在 QEMU 中比较“直接运行 RTOS”“Axvisor 承载 RTOS guest”和“Axvisor AMP 实时路径”三种方案，再在 RK3588 真机上单独展示 Axvisor AMP 的控制侧实时数据。这样可以避免把不同量纲的数据混为同一类跑分，同时突出 AMP 方案的核心收益：不是让通用 guest 跑分超过裸 RTOS，而是把高频控制闭环从 guest/vCPU/虚拟中断路径中移出。
+任务一先对比 `bare RTOS`、`RTOS guest` 和 `Axvisor AMP` 三种路径。`bare RTOS` 表示 QEMU 直接运行 FreeRTOS，是没有虚拟化隔离时的性能基线；`RTOS guest` 表示 FreeRTOS 作为 Axvisor guest 运行，能够获得 VM 隔离，但调度、中断和抢占仍经过 vCPU、虚拟中断和 hypervisor 返回链路；`Axvisor AMP` 则把高频实时控制从 guest 中移出，在 Axvisor 侧保留实时执行资源，只让智能侧 guest 通过低频命令影响控制目标。
 
 ![QEMU 环境三种实时路径对比](assets/amp-qemu-three-way.svg)
 
-第一张图中，`qemu + freertos` 是 FreeRTOS 直接运行的基线；`qemu + axvisor + freertos(guest)` 表示完整 RTOS 作为 Axvisor guest 运行，noload 下仍保留约 93.9% 到 99.9% 的基线效率，但调度、中断和抢占路径继续经过 vCPU、虚拟中断和 hypervisor 返回链路；`qemu + axvisor(amp方案)` 则把实时控制路径放在 Axvisor 侧保留执行资源上，QEMU 下任务切换、抢占、中断和信号量平均耗时处于 2.859us 到 5.263us 区间。
+从 QEMU noload 数据看，RTOS guest 相对直接 RTOS 仍保留约 93.9% 到 99.9% 的基线效率，说明 Axvisor guest 方案本身具备可接受的基础开销。但这也说明调度、中断和抢占路径仍处在虚拟化链路中；对于双轮足 8ms 平衡闭环，这部分抖动会直接进入控制周期预算。QEMU 下 Axvisor AMP 路径的任务切换、抢占、中断和信号量平均耗时处于 2.859us 到 5.263us 区间，验证了把控制路径从 guest 中拆出来的可行性。
 
 ![RK3588 真机 Axvisor AMP 实测数据](assets/amp-rk3588-realtime.svg)
 
-第二张图只展示真机 Axvisor AMP 数据。RK3588 上任务切换平均 `1066 ns`，抢占平均 `1023 ns`，中断平均 `654 ns`，信号量 shuffle 平均 `1022 ns`，1ms tick jitter 为 `4084 ns`。对于双轮足机器人 8ms 平衡闭环，`4084 ns` 只占周期预算约 `0.0511%`，说明 AMP 路径给 EKF/LQR 控制计算、MPU6050 读取、Lingkong 电机 UART 事务和安全降级逻辑留下了主要时间预算。
+真机 RK3588 上，Axvisor AMP 路径进一步体现出实时控制优势：任务切换平均 `1066 ns`，抢占平均 `1023 ns`，中断平均 `654 ns`，信号量 shuffle 平均 `1022 ns`，1ms tick jitter 为 `4084 ns`。`4084 ns` 只占 8ms 控制周期约 `0.0511%`，为 EKF/LQR 控制计算、MPU6050 读取、Lingkong 电机 UART 事务和安全降级逻辑留下主要时间预算。
 
-AMP 方案相比单纯“RTOS guest 虚拟化”的优势体现在控制路径结构上：智能侧 StarryOS 可以运行 Python、NPU 推理、文件系统和网络协议等通用负载；实时侧控制闭环则不再依赖 guest OS 调度和虚拟设备路径，只通过 mailbox 接收低频目标命令。AI 侧推理延迟可能达到数十或数百毫秒，但它只改变下一段运动目标；真正维持机器人站稳的是 8ms 周期任务，因此必须由实时 CPU 预留、绑核、RT FIFO 和 PI mutex 共同保护。
+基于上述验证，任务一选择 AMP 而不是“控制侧 RTOS guest”作为实时控制方案，并提出 [#2160](https://github.com/rcore-os/tgoskits/pull/2160)：在 Axvisor/runtime 边界增加实时 CPU 预留能力，使智能侧 guest 的 vCPU、虚拟设备 I/O 和普通任务不能占用实时控制路径所需的 CPU 时间。#2160 是任务一的隔离主线，后续调度和同步改造都服务于这个预留实时 CPU 上的控制任务。
 
-### 3.6 隔离设计
+### 3.3 ArceOS 实时性能力缺口
 
-隔离设计包括内存隔离、CPU 时间隔离、设备访问隔离和同步路径隔离。内存隔离通过虚拟地址空间和 VM 配置限定智能侧 guest 可访问范围；CPU 时间隔离通过 #2160 的实时 CPU 预留、vCPU 配置和绑核策略降低互相干扰；设备访问隔离通过直通设备、虚拟设备和排除设备列表控制访问边界；同步路径隔离则由 #2162 补齐，避免实时侧高优先级任务在 mutex 争用中被普通任务间接阻塞。
+AMP 方案确定后，还需要检查预留 CPU 上的 ArceOS/实时任务能力是否足够。当前 ArceOS 默认 FIFO 调度器适合作为普通协作式 ready queue，但它只按入队顺序选择任务，不表达“高优先级任务优先运行”的实时语义。即使任务结构中已有 `sched_priority` 字段，默认 FIFO 也不会读取这个字段；高优先级任务如果后入队，仍可能排在先入队的低优先级任务之后。
 
-#2162 的 priority inheritance 不改变 VM 内存隔离边界，它解决的是实时任务内部的优先级反转。原有 `RawMutex` 只有 `owner_id` 和 wait queue，高优先级 waiter 阻塞时不会改变低优先级 owner 的调度地位；加入 PI 后，contended lock 会将 waiter 的 effective priority donation 给 owner，并在必要时触发 ready queue 重排，owner unlock 后再清理 donation。
+另一个问题是锁等待路径没有真正使用优先级。sleepable mutex 原有实现只记录 `owner_id` 和 wait queue，高优先级任务等待低优先级 owner 持有的 mutex 时，不会把优先级捐赠给 owner。如果此时中优先级任务持续运行，就会出现典型优先级反转：高优先级控制任务被低优先级持锁者间接阻塞，而低优先级持锁者又被中优先级任务抢占，导致 mutex 无法及时释放。
 
-| PI 状态或函数 | 作用 | 隔离意义 |
-| --- | --- | --- |
-| `base_sched_priority` | 保存调用方设置的基础优先级 | donation 不覆盖用户配置 |
-| `donated_sched_priority` | 保存 mutex waiter 临时捐赠 | owner 可临时继承高优先级 |
-| `effective_sched_priority` | 调度器实际观察的优先级 | RT FIFO 能按 donation 后优先级排序 |
-| `mutex_wait_owner_id` | 记录当前任务等待的 owner | 支持 A 等 B、B 等 C 的链式传播 |
-| `requeue_task_after_priority_change()` | 重新插入 ready queue | priority 改变后调度顺序立即生效 |
+这些缺口说明 mailbox 只能作为智能侧到实时侧的命令通道，不能替代调度器和同步原语的实时语义。完整实时路径需要同时满足三个条件：ready queue 按有效优先级选择任务；timer tick 能在更高优先级任务 ready 时请求重调度；mutex 争用时能让 owner 临时继承 waiter 的优先级。
 
-隔离能力的验证不只依赖源码说明，还应通过压力测试和异常注入形成证据。例如在智能侧执行 CPU/内存压力负载，同时持续测量 Axvisor RT 周期任务延迟和通信响应时间；在实时任务路径中构造低优先级 owner、高优先级 waiter 和中优先级干扰任务，验证中优先级任务不能长期阻止 owner 释放 mutex。
+### 3.4 解决方案：RT FIFO 调度与 mutex 优先级继承
 
-### 3.7 预期效果与边界
+针对 ArceOS 调度缺口，[#2161](https://github.com/rcore-os/tgoskits/pull/2161) 在 `components/axsched/src/rt_fifo.rs` 中新增 `RtFifoScheduler`。它通过 `RtPriority::rt_priority()` 获取任务有效优先级，并用 `(Reverse(priority), enqueue_order)` 维护 ready queue。这样高优先级任务总是先于低优先级任务被选中，同优先级任务仍保持 FIFO 入队顺序，符合实时 FIFO 的基本语义。
 
-任务一预期交付一套可复现的 Axvisor AMP 实时运行方案，能够说明智能侧 guest 如何配置、实时 CPU 如何预留、Axvisor 关键路径如何测量，以及实时控制路径如何不被智能侧负载显著破坏。#2160 是实时 CPU 预留和隔离主线；#2163、#2164 和 #2165 补齐 Axvisor 启动、板级 I/O 和调频路径；#2161 和 #2162 作为实时任务调度与同步语义支撑。
+`sched-rt-fifo` 通过 feature 接入 `axtask` 和 `ax-std`，不会替换默认 FIFO、RR 或 CFS 路径。当前实现限定在 `SMP=1`，用于预留实时 CPU 上的单核控制任务；多核全局实时调度仍需要后续处理跨 CPU push/pull、远程抢占和任务迁移协议。
 
-当前边界需要明确记录：#2161 的 RT FIFO 只承诺单核调度语义，不承诺 SMP 全局实时调度；#2162 的 mutex PI 是 `sched-rt-fifo` 下的最小闭环，不等同于完整 POSIX `PTHREAD_PRIO_INHERIT`，也尚未实现 per-mutex waiter priority 重新计算、多锁 owner 的完整 donation 重算或 priority-aware wait queue。任务一的比赛价值在于形成可运行、可测量、可解释的实时性与隔离基础，而不是替代硬实时认证系统。
+针对 mutex 优先级反转，[#2162](https://github.com/rcore-os/tgoskits/pull/2162) 在 #2161 的 RT FIFO 基础上为 `axtask` mutex 路径加入 priority inheritance。它区分基础优先级和捐赠优先级，使高优先级 waiter 阻塞时可以临时提升低优先级 owner 的 effective priority；owner unlock 后再清理或重算 donation，并通过 ready queue 重排让调度器观察到新的有效优先级。
 
-| 验收关注点 | 已有证据 | 后续补强方向 |
-| --- | --- | --- |
-| Axvisor CPU 隔离 | #2160 的实时 CPU 预留设计与 host glue 接入，`amp-qemu-three-way.svg` 和 `amp-rk3588-realtime.svg` 的对比数据 | 增加板级多负载下的 RT 周期延迟记录 |
-| Axvisor I/O 与调频路径 | #2163、#2164、#2165 的 guest 启动、SD 主机和 RK3588 governor 修复 | 增加板级 guest 加载、I/O 压力和频率 readout 记录 |
-| RT FIFO 调度 | #2161 的 scheduler 单测和 ArceOS QEMU case | 作为预留 CPU 实时任务语义验证 |
-| Mutex PI | #2162 的 QEMU PI 场景、clippy 和设计文档 | 补齐 per-mutex donation 重算和 priority-aware wait queue |
-| 与任务二/三衔接 | Axvisor 实时侧支撑 GIPC/RT mailbox 和 AI 控制闭环 | 在端到端日志中加入 Axvisor RT 周期延迟指标 |
+| PR | 解决的问题 | 关键机制 | 验证重点 |
+| --- | --- | --- | --- |
+| [#2160](https://github.com/rcore-os/tgoskits/pull/2160) | Axvisor 层隔离不足 | 实时 CPU 预留，隔离智能侧 guest 与实时控制路径 | AMP 对比图、RK3588 真机实时数据 |
+| [#2161](https://github.com/rcore-os/tgoskits/pull/2161) | 默认 FIFO 不支持 RT 优先级 | `RtFifoScheduler` 按有效优先级和 FIFO 顺序选任务 | 高优先级先运行、同优先级 FIFO、tick 抢占判定 |
+| [#2162](https://github.com/rcore-os/tgoskits/pull/2162) | mutex 未使用优先级，存在优先级反转 | base/donated/effective priority，owner donation，ready queue 重排 | 高优先级 waiter 不被中优先级任务长期间接阻塞 |
+
+三项改动组合后，任务一形成完整链路：#2160 先把实时控制任务从智能侧 guest 和普通 vCPU 中隔离出来；#2161 保证预留 CPU 上高优先级控制任务优先运行；#2162 保证控制任务等待 mutex 时不会被优先级反转长期阻塞。该链路支撑后续任务三中双轮足机器人 8ms 平衡闭环的稳定运行。
 
 ## 4. 任务二：客户机通信与协议设计
 
