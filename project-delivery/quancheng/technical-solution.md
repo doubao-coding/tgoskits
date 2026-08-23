@@ -111,7 +111,7 @@ Axvisor 作为统一底座，负责把智能侧 guest 与实时侧 CPU 放在同
 - 普通 Axvisor worker、虚拟设备后端、文件系统、网络和控制台任务不能进入 `pCPU3`。
 - 非实时外部 IRQ 不路由到 `pCPU3`；该核只处理本地实时 timer、实时设备 IRQ 和明确允许的 doorbell/IPI。
 - 在 StarryOS CPU、网络和存储压力下，实时周期任务仍能报告可复现的最大唤醒时延、执行抖动和 deadline miss 数。
-- AMP 功能默认关闭；关闭后现有 Axvisor 的 CPU、VM、IRQ 和测试行为保持不变。
+- 编译期将实时核 ID 配置为 `-1` 时不建立实时域，也不运行实时任务；现有 Axvisor 的 CPU、VM、IRQ 和测试行为保持不变。
 
 ### 3.2 验证 bare、guest 与 AMP 方案实时性差异
 
@@ -149,38 +149,58 @@ AMP 方案确定后，还需要检查预留 CPU 上的 ArceOS/实时任务能力
 | 独立 RT runtime/静态 executor | `pCPU3` 不初始化 `axtask` | 热路径更小，隔离更强 | 无法直接复用 #2161/#2162，需独立 timer、executor 和同步模型 | 后续演进方案 |
 | 独立裸机 RT 镜像 | 固件分别启动 Axvisor 与 RTOS | 故障和内存隔离最强 | 启动、内存、IRQ、设备和通信所有权改造最大 | 严格硬实时阶段评估 |
 
-第一阶段采用“静态 CPU 分区 + 单核 RT FIFO”。它并不承诺完整的多核全局实时调度：实时调度域只有 `pCPU3` 一个核，所有 RT task 的 CPU mask 都是 `0b1000`，因此无需跨 CPU RT push/pull、远程优先级抢占或 RT task 迁移。`pCPU0..2` 上的 vCPU 和 housekeeping task 仍是普通任务，不能通过提高优先级进入实时域。
+第一阶段采用“静态 CPU 分区 + 单核 RT FIFO”。它并不承诺完整的多核全局实时调度：实时调度域只有编译期指定的一个物理核，因此无需跨 CPU RT push/pull、远程优先级抢占或 RT task 迁移。`pCPU0..2` 上的 vCPU 和 housekeeping task 仍是普通任务，不能通过提高优先级进入实时域。实时任务调用方不直接构造或保存 CPU mask，而是通过专用创建函数进入已经确定的 realtime domain。
 
 ### 3.5 CPU 分区、启动和调度设计
 
-CPU 分区必须是系统唯一事实源，不能由 VM 配置、调度器、IRQ 和设备模块分别硬编码“最后一个核”。建议在 Axvisor/runtime 边界定义经过验证的分区对象：
+CPU 分区必须是系统唯一事实源，不能由 VM 配置、调度器、IRQ 和设备模块分别硬编码“最后一个核”。实时核由编译期配置指定，例如生成的构建配置项 `REALTIME_CPU_ID`：非负值表示物理逻辑 CPU ID，`-1` 表示禁用实时域。负数哨兵只允许存在于构建配置解析边界；进入 Rust 运行时后必须立即转换成 `Option<CpuId>`，不能让 `-1` 继续以裸整数参与 mask、索引或 IRQ affinity 计算。
+
+建议在 Axvisor/runtime 边界定义经过验证的分区对象：
 
 ```rust
 pub struct CpuPartition {
     virtualization: AxCpuMask,
-    realtime: AxCpuMask,
+    realtime_cpu: Option<CpuId>,
 }
 ```
 
-4 核默认 AMP 配置为：
+4 核 AMP 配置示例为：
 
 ```text
-virtualization_cpu_mask = 0b0111  # pCPU0..2
-realtime_cpu_mask       = 0b1000  # pCPU3
+REALTIME_CPU_ID = 3
+
+online_cpu_mask         = 0b1111
+realtime_cpu            = Some(pCPU3)
+realtime_cpu_mask       = 0b1000  # 由 CPU ID 统一派生
+virtualization_cpu_mask = 0b0111  # online mask 扣除实时核后统一派生
 
 Starry vCPU0 -> 0b0001
 Starry vCPU1 -> 0b0010
 Starry vCPU2 -> 0b0100
-RT task      -> 0b1000
+RT task      -> spawn_realtime(...) 自动选择 pCPU3
 ```
 
-启动时必须验证两个 mask 非空、互不相交、并集不超出平台实际 online CPU 集，且第一阶段 realtime mask 恰好包含一个非 BSP CPU。非法配置应在启动 VM 或创建实时任务前返回可诊断错误，不能静默裁剪、重映射或回退到完整 CPU mask。
+禁用配置为：
+
+```text
+REALTIME_CPU_ID = -1
+
+realtime_cpu            = None
+realtime_cpu_mask       = 0b0000
+virtualization_cpu_mask = online_cpu_mask
+spawn_realtime(...)     = Err(RealtimeDisabled)
+```
+
+构建脚本负责解析整数并生成常量，SMP 初始化阶段再用平台实际拓扑验证该 ID。启用实时域时，ID 必须位于 online CPU 集、不能超过构建期 CPU capacity，且第一阶段不能选择 BSP；禁用时必须恰好为 `-1`，其他负数均视为配置错误。非法配置应在启动 VM 或创建实时任务前失败，不能静默裁剪、改选最后一个核或回退到完整 CPU mask。验证成功后，由 `CpuPartition` 统一派生 virtualization mask、realtime mask、VM 可用 CPU 集和 IRQ affinity，其他模块不得再次解释原始整数配置。
 
 ```mermaid
 flowchart TD
-    Boot[固件发现 4 个物理 CPU] --> Validate[验证 CpuPartition]
+    Build[编译期 REALTIME_CPU_ID] --> Boot[固件发现物理 CPU]
+    Boot --> Validate[解析为 Option CPU ID 并验证 CpuPartition]
+    Validate --> Disabled[-1: 不建立实时域]
     Validate --> Virt[pCPU0..2 虚拟化域]
     Validate --> RT[pCPU3 实时域]
+    Disabled --> AllHost[全部在线 CPU 属于普通 Axvisor]
     Virt --> Host[Axvisor housekeeping]
     Virt --> V0[Starry vCPU0]
     Virt --> V1[Starry vCPU1]
@@ -190,9 +210,20 @@ flowchart TD
     RQ --> RtEvent[实时事件任务]
 ```
 
-所有 secondary CPU 先完成 per-CPU area、trap vector、local interrupt controller 和 CPU-local timer 所需的最小初始化，再按 CPU 所有权进入不同路径。`pCPU0..2` 完成现有 Axvisor SMP、IPI、block runtime 和普通 scheduler 初始化；`pCPU3` 只建立受限 RT run queue、RT timer 和通信端点，不发布为普通任务可选 CPU。普通 runtime 的 ready 计数、IPI readiness、block hctx 扩展和 `available_parallelism()` 必须使用虚拟化域，而不是物理 CPU 总数。
+所有 secondary CPU 先完成 per-CPU area、trap vector、local interrupt controller 和 CPU-local timer 所需的最小初始化，再读取已经验证的 CPU ownership。普通 CPU 完成现有 Axvisor SMP、IPI、block runtime 和普通 scheduler 初始化；指定的实时 CPU 只建立受限 RT run queue、RT timer 和通信端点，不发布为普通任务可选 CPU。`REALTIME_CPU_ID=-1` 时不创建 RT run queue 或 RT worker，所有 online CPU 都沿用普通初始化路径。普通 runtime 的 ready 计数、IPI readiness、block hctx 扩展和 `available_parallelism()` 必须使用 virtualization domain，而不是未经分区的物理 CPU 总数。
 
-AxVM 已支持通过 `phys_cpu_sets` 给 vCPU task 设置 CPU mask。VM 配置必须把 3 个 vCPU 分别固定到 `0b0001`、`0b0010` 和 `0b0100`，并在 `build_axvm_config()` 或等价的 placement 校验边界拒绝任何包含 realtime mask 的 vCPU 配置。普通 Axvisor task 的默认 mask 也必须从“全部在线 CPU”改为 virtualization mask；实时 task 则只能通过专门入口创建，在第一次入队前同时设置 `realtime` mask 和 RT priority。
+AxVM 已支持通过 `phys_cpu_sets` 给 vCPU task 设置 CPU mask。启用示例中的 CPU3 实时域时，VM 配置把 3 个 vCPU 分别固定到 `0b0001`、`0b0010` 和 `0b0100`，并在 `build_axvm_config()` 或等价的 placement 校验边界拒绝任何包含派生 realtime mask 的 vCPU 配置。`REALTIME_CPU_ID=-1` 时不施加实时域排除，VM placement 继续按现有在线 CPU 集校验。
+
+普通 Axvisor task 的默认 mask 必须取自 virtualization domain。实时任务只能通过类似以下专用入口创建：
+
+```rust
+pub fn spawn_realtime(
+    task: TaskInner,
+    priority: RtTaskPriority,
+) -> Result<AxTaskRef, SpawnRealtimeError>;
+```
+
+该函数从已经验证的 `CpuPartition` 读取唯一 realtime CPU，在任务第一次进入任何 run queue 前原子地完成单核 affinity、RT priority 和任务类别初始化，然后直接加入对应 RT run queue。调用方不接收 CPU ID 或 `AxCpuMask` 参数，也不需要知道实时核是哪一个。实时域未启用时返回 `SpawnRealtimeError::RealtimeDisabled`；配置与运行时拓扑不一致时在 SMP 初始化阶段已经失败，不能在创建任务时临时换核。普通 `spawn`/`spawn_task` 也不得通过后续 `set_cpumask()` 迁移到 realtime CPU。
 
 ### 3.6 RT FIFO、优先级继承与实时任务约束
 
@@ -207,7 +238,7 @@ AxVM 已支持通过 `phys_cpu_sets` 给 vCPU task 设置 CPU mask。VM 配置�
 - 启动阶段预分配 stack、队列、消息和统计区，进入周期循环后不调用全局 allocator。
 - 不访问文件系统，不执行同步串口打印，不调用 VM manager 或普通虚拟设备后端。
 - 不获取可能由 virtualization domain 持有的 sleepable lock；确需共享 mutex 时必须纳入 #2162 的 donation 链和锁顺序验证。
-- 不创建 CPU mask 可变的 RT task，不支持跨核迁移；非法 affinity 修改返回明确错误。
+- 不暴露 RT task 的 CPU mask 选择，不支持跨核迁移；实时任务创建入口自动使用编译期指定并经 SMP 初始化验证的唯一实时核。
 - 周期、deadline 和优先级使用类型化配置，优先级范围在入队前验证，不能把任意 `isize` 直接作为长期外部配置契约。
 
 ### 3.7 IRQ、内存和设备所有权
@@ -244,9 +275,9 @@ sequenceDiagram
 | 阶段 | 交付内容 | 可观察验收 | 回滚方式 |
 | --- | --- | --- | --- |
 | 1 | 合入并修复 #2161 的 RT FIFO、测试发现和 CI 执行链 | scheduler 单元测试及单核 QEMU case 实际执行 | 关闭 `sched-rt-fifo` |
-| 2 | 增加唯一 `CpuPartition`、4 核配置验证和 vCPU placement 拒绝逻辑 | StarryOS 3 vCPU 固定在 `pCPU0..2` | 关闭 AMP 配置恢复完整 host mask |
-| 3 | 建立 `pCPU3` 受限 RT run queue，排除普通 task、IPI readiness 和 block hctx | RT 心跳只出现在 `pCPU3`，VM/shell 正常 | 保留分区代码但不创建 realtime domain |
-| 4 | 完成 IRQ affinity、RT timer、预分配内存和统计 | 非 RT IRQ 不进入 `pCPU3`，timer/deadline 统计递增 | 禁用 RT IRQ route 和 executor |
+| 2 | 增加编译期 `REALTIME_CPU_ID`、`CpuPartition`、SMP 拓扑验证和 vCPU placement 拒绝逻辑 | `3` 派生 CPU3 实时域；`-1` 保持全部 CPU 为普通域 | 配置为 `-1` |
+| 3 | 增加 `spawn_realtime()` 并建立指定核的受限 RT run queue，排除普通 task、IPI readiness 和 block hctx | 调用方无需 mask；RT 心跳只出现在指定核，VM/shell 正常 | 配置为 `-1` 后不创建 realtime domain |
+| 4 | 完成 IRQ affinity、RT timer、预分配内存和统计 | 非 RT IRQ 不进入指定实时核，timer/deadline 统计递增 | 禁用 RT IRQ route 和 executor |
 | 5 | 接入 command/event ring 与 doorbell | host/guest 能双向交换有序消息，满队列可观察 | 禁用 mailbox feature |
 | 6 | 合入 #2162 或等价 PI mutex，并接入真实控制任务/设备 | 优先级反转回归通过，8ms 控制闭环运行 | 回退到无共享 mutex 的静态控制路径 |
 
@@ -256,12 +287,13 @@ sequenceDiagram
 
 | 风险或功能声明 | 验证层级 | 必须观察的结果 |
 | --- | --- | --- |
-| CPU mask 配置正确 | 单元测试 | mask 非空、互斥、覆盖在线 CPU；非法 vCPU placement 被拒绝 |
+| 编译期实时核配置正确 | 构建/单元测试 | `-1` 转换为 `None`；有效 ID 派生唯一 mask；其他负数、越界、离线或 BSP ID 被拒绝 |
+| 实时任务创建边界 | `axtask` 单元/集成测试 | `spawn_realtime()` 自动绑到指定核；禁用时返回 `RealtimeDisabled`；调用方无法传入 mask |
 | RT FIFO 语义 | `axsched` 单元测试 | 高优先级先运行、同优先级 FIFO、仅更高优先级触发 RT 抢占 |
-| 4 核启动分流 | Axvisor QEMU SMP4 | `pCPU0..2` host ready，`pCPU3` RT ready，无 readiness 死等 |
-| Starry vCPU 隔离 | Axvisor + StarryOS SMP3 | vCPU task 从未在 `pCPU3` 执行 |
-| housekeeping 隔离 | QEMU instrumentation/板卡统计 | 普通 task、block hctx、console worker 从未进入 `pCPU3` |
-| IRQ 隔离 | QEMU 模拟 IRQ/板卡 | 非 RT IRQ 计数在 `pCPU3` 始终为零 |
+| 4 核启动分流 | Axvisor QEMU SMP4 | virtualization CPU host ready，指定 CPU RT ready，无 readiness 死等；`-1` 时 4 核均走普通路径 |
+| Starry vCPU 隔离 | Axvisor + StarryOS SMP3 | vCPU task 从未在指定实时核执行 |
+| housekeeping 隔离 | QEMU instrumentation/板卡统计 | 普通 task、block hctx、console worker 从未进入指定实时核 |
+| IRQ 隔离 | QEMU 模拟 IRQ/板卡 | 非 RT IRQ 计数在指定实时核始终为零 |
 | 通信正确性 | IVC/mailbox 集成测试 | 顺序、边界、满队列、重启和超时行为确定 |
 | PI mutex | 确定性三任务回归 | 中优先级任务不能长期间接阻塞高优先级 waiter |
 | 8ms 控制闭环 | RK3588 压力测试 | 报告最大 wake-up latency、最大 jitter、WCET 和 deadline miss，而非只报平均值 |
