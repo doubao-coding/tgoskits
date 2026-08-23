@@ -50,6 +50,7 @@ pub fn run() -> crate::TestResult {
     run_mutex_abc_chain_priority_inheritance_test()?;
     run_mutex_donation_survives_other_mutex_release_test()?;
     super::pi_latency::run_wakeup_latency_benchmark()?;
+    super::rt_verify::run_realtime_verification()?;
 
     std::println!("sched-rt-fifo single-core behavior OK");
     Ok(())

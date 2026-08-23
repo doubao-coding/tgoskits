@@ -56,6 +56,10 @@ test-backtrace-panic = ["backtrace"]
 test-panic-no-backtrace = ["dep:axbacktrace"]
 test-console-interleave = ["dep:ax-log"]
 test-console-atomic-output = ["ax-std/sched-rr"]
+# Realtime FIFO scheduler + priority inheritance + deferred timer softirq for
+# the Axvisor host runtime (consumed via axstd/ax_task). Improves determinism
+# of host scheduling, locking and timer paths under load.
+sched-rt-fifo = ["ax-std/sched-rt-fifo"]
 # axum-based management HTTP server (see src/http/ for the Router).
 # Off by default. Replaces the hand-rolled pilot, which is intentionally not
 # carried forward.

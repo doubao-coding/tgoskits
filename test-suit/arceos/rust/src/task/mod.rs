@@ -16,6 +16,8 @@ pub mod rt_fifo;
 pub mod rt_fifo_iso;
 #[cfg(feature = "sched-rt-fifo-smp")]
 pub mod rt_fifo_smp;
+#[cfg(any(feature = "sched-cfs", feature = "sched-rr", feature = "sched-rt-fifo"))]
+pub mod rt_verify;
 #[cfg(feature = "task-sleep")]
 pub mod sleep;
 #[cfg(feature = "task-smp-online")]

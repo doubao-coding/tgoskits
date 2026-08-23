@@ -1,0 +1,27 @@
+# QEMU aarch64 Axvisor board with the realtime scheduler enabled.
+#
+# Builds Axvisor with `ax-std/sched-rt-fifo` (priority-ordered ready queue, mutex
+# priority inheritance, deferred timer softirq) and reserves physical CPU 3 as
+# the realtime domain via the build-time `RT_CPUMASK=3`. With 4 physical CPUs
+# (SMP=4): pCPU0..2 run the Axvisor host + the 2-vCPU Linux guest; pCPU3 runs
+# only realtime tasks created via `ax_task::spawn_rt_task`. Non-realtime host
+# tasks keep the default full CPU mask and may run on pCPU0..2.
+#
+# Boot: `cargo xtask axvisor run --board qemu-aarch64-rt` (see the task-1
+# runbook for full build/boot/test commands and the Linux guest image asset).
+
+features = [
+    "fs",
+    "sched-rt-fifo",
+]
+log = "Info"
+target = "aarch64-unknown-none-softfloat"
+# 2-vCPU Linux guest pinned to pCPU0..1; pCPU3 is reserved for RT.
+vm_configs = [
+    "os/axvisor/configs/vms/qemu/aarch64/linux-smp2.toml",
+]
+
+[env]
+# Reserve physical CPU 3 for realtime tasks. Set to empty or remove to disable
+# the RT domain (all CPUs run all tasks; behavior reverts to plain SMP).
+RT_CPUMASK = "3"

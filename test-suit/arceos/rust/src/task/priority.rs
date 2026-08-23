@@ -82,5 +82,6 @@ pub fn run() -> crate::TestResult {
 
     assert_eq!(expect, actual);
     super::pi_latency::run_wakeup_latency_benchmark()?;
+    super::rt_verify::run_realtime_verification()?;
     Ok(())
 }
