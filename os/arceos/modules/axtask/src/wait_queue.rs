@@ -187,7 +187,7 @@ impl WaitQueue {
     /// If `resched` is true, the current task will be preempted when the
     /// preemption is enabled.
     pub fn notify_one(&self, resched: bool) -> bool {
-        let task = self.pop_front();
+        let task = self.pop_next_waiter();
         if let Some(task) = task {
             unblock_one_task(task, resched);
             return true;
@@ -221,7 +221,8 @@ impl WaitQueue {
     {
         let task = {
             let mut wq = self.queue.lock_irqsave();
-            match wq.pop_front() {
+            let selected = pop_next_waiter_index(&mut wq);
+            match selected.and_then(|idx| wq.remove(idx)) {
                 Some(task) => {
                     func(task.id().as_u64());
                     task.set_in_wait_queue(false);
@@ -262,11 +263,34 @@ impl WaitQueue {
         }
     }
 
-    fn pop_front(&self) -> Option<AxTaskRef> {
+    fn pop_next_waiter(&self) -> Option<AxTaskRef> {
         let mut wq = self.queue.lock_irqsave();
-        let task = wq.pop_front()?;
+        let idx = pop_next_waiter_index(&mut wq)?;
+        let task = wq.remove(idx)?;
         task.set_in_wait_queue(false);
         Some(task)
+    }
+}
+
+/// Returns the index of the next waiter to wake.
+///
+/// Under `sched-rt-fifo` this is the highest-priority waiter so a mutex or
+/// wait queue releases the most urgent blocked task first; other
+/// configurations keep FIFO order by selecting the front index.
+fn pop_next_waiter_index(wq: &mut WaitQueueGuard<'_>) -> Option<usize> {
+    if wq.is_empty() {
+        return None;
+    }
+    #[cfg(feature = "sched-rt-fifo")]
+    {
+        wq.iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.sched_priority().cmp(&b.sched_priority()))
+            .map(|(idx, _)| idx)
+    }
+    #[cfg(not(feature = "sched-rt-fifo"))]
+    {
+        Some(0)
     }
 }
 

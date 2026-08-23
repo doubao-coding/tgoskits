@@ -49,6 +49,10 @@ tracepoint-hooks = ["multitask"]
 uspace = ["ax-hal/uspace"]
 
 sched-cfs = ["multitask", "preempt"]
+# Realtime FIFO scheduler with priority-ordered ready queue and mutex
+# priority inheritance. Currently restricted to SMP=1 because system-level
+# highest-priority selection across CPUs is not yet implemented.
+sched-rt-fifo = ["multitask", "preempt"]
 sched-rr = ["multitask", "preempt"]
 
 host-test = [

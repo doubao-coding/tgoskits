@@ -20,6 +20,7 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed={LINKER_TEMPLATE_NAME}");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_EXT_LD");
     println!("cargo:rerun-if-env-changed=SMP");
+    println!("cargo:rerun-if-env-changed=TICKS_PER_SEC");
     println!("cargo:rerun-if-env-changed=DWARF");
     println!("cargo:rerun-if-env-changed=AXTEST_COVERAGE");
 
@@ -148,6 +149,20 @@ impl RuntimeConfig {
                 .map_err(|err| invalid_data(format!("failed to parse SMP value `{smp}`: {err}")))?;
         }
 
+        // Allow builds to raise the scheduler clock frequency above the default
+        // 100 Hz so higher-priority ready tasks preempt a CPU-bound task sooner.
+        // A realtime configuration typically sets this to 1000 or higher.
+        if let Ok(ticks) = env::var("TICKS_PER_SEC") {
+            config.ticks_per_sec = parse_usize(&ticks).map_err(|err| {
+                invalid_data(format!(
+                    "failed to parse TICKS_PER_SEC value `{ticks}`: {err}"
+                ))
+            })?;
+            if config.ticks_per_sec == 0 {
+                return Err(invalid_data("TICKS_PER_SEC must be greater than zero"));
+            }
+        }
+
         Ok(config)
     }
 }
@@ -227,5 +242,29 @@ mod tests {
                 "pub const TICKS_PER_SEC: usize = 100usize;\n",
             ))
         );
+    }
+
+    #[test]
+    fn load_reads_ticks_per_sec_override() {
+        // The default is 100 Hz; an explicit override must replace it so a
+        // realtime build can raise the scheduler clock frequency. Zero must
+        // be rejected. Both cases share one test to avoid racing on a process
+        // global environment when the test runner is parallel.
+        let prior = std::env::var("TICKS_PER_SEC").ok();
+
+        std::env::set_var("TICKS_PER_SEC", "1000");
+        let config = RuntimeConfig::load().expect("load must accept a valid TICKS_PER_SEC");
+        assert_eq!(config.ticks_per_sec, 1000);
+
+        std::env::set_var("TICKS_PER_SEC", "0");
+        assert!(
+            RuntimeConfig::load().is_err(),
+            "TICKS_PER_SEC=0 must be rejected",
+        );
+
+        match prior {
+            Some(value) => std::env::set_var("TICKS_PER_SEC", value),
+            None => std::env::remove_var("TICKS_PER_SEC"),
+        }
     }
 }

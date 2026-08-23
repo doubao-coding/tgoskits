@@ -34,6 +34,12 @@
     test_runner(crate::bare_metal_test_runner)
 )]
 
+// `sched-rt-fifo` on SMP uses per-CPU ready queues plus a forced (non-coalesced)
+// reschedule IPI on cross-CPU RT wakeups (see `force_kick_remote_cpu` in
+// `add_task`/`unblock_task`). This gives cross-core wake preemption but does NOT
+// implement global push/pull balancing, so it is not a full "system-level
+// highest priority first" guarantee. That stronger guarantee is future work.
+
 #[cfg(all(feature = "host-test", not(target_os = "none")))]
 extern crate std;
 

@@ -47,7 +47,10 @@ pub fn default_task_stack_size() -> usize {
 }
 
 cfg_if::cfg_if! {
-    if #[cfg(feature = "sched-rr")] {
+    if #[cfg(feature = "sched-rt-fifo")] {
+        pub(crate) type AxTask = ax_sched::RtFifoTask<TaskInner>;
+        pub(crate) type Scheduler = ax_sched::RtFifoScheduler<TaskInner>;
+    } else if #[cfg(feature = "sched-rr")] {
         const MAX_TIME_SLICE: usize = 5;
         pub(crate) type AxTask = ax_sched::RRTask<TaskInner, MAX_TIME_SLICE>;
         pub(crate) type Scheduler = ax_sched::RRScheduler<TaskInner, MAX_TIME_SLICE>;
@@ -215,6 +218,28 @@ pub(crate) fn cpu_mask_full() -> AxCpuMask {
     *CPU_MASK_FULL
 }
 
+/// Returns the CPU mask reserved for realtime tasks under `sched-rt-fifo`.
+///
+/// Empty (no CPUs set) when `RT_CPUMASK` was not configured at build time, in
+/// which case there is no host-internal CPU isolation. Use this as the affinity
+/// of a realtime task spawned via [`spawn_rt_task`].
+pub fn rt_cpu_mask() -> AxCpuMask {
+    use ax_lazyinit::LazyLock;
+
+    static RT_CPU_MASK: LazyLock<AxCpuMask> = LazyLock::new(|| {
+        let cpu_num = ax_hal::cpu_num();
+        let mut cpumask = AxCpuMask::new();
+        for cpu_id in crate::build_info::RT_CPUMASK {
+            if *cpu_id < cpu_num {
+                cpumask.set(*cpu_id, true);
+            }
+        }
+        cpumask
+    });
+
+    *RT_CPU_MASK
+}
+
 /// Initializes the task scheduler for secondary CPUs.
 pub fn init_scheduler_secondary(stack_ptr: VirtAddr, stack_size: usize) {
     crate::run_queue::init_secondary(stack_ptr, stack_size);
@@ -234,11 +259,30 @@ pub fn on_timer_tick() {
 #[cfg_attr(doc, doc(cfg(feature = "irq")))]
 pub fn on_timer_irq(scheduler_tick: bool) {
     crate::timers::begin_hardware_timer_irq();
-    crate::timers::check_events(scheduler_tick);
-    if scheduler_tick {
-        // Since irq and preemption are both disabled here,
-        // we can get the current run queue without another context transition.
-        current_run_queue::<crate::sync::RawState>().scheduler_timer_tick();
+    // Hard-IRQ callbacks must run in interrupt context, so they always run
+    // here regardless of the deferred path.
+    crate::timers::check_irq_callbacks();
+    #[cfg(feature = "sched-rt-fifo")]
+    {
+        // Keep the cheap scheduler tick in the hard IRQ so a higher-priority
+        // ready task preempts without waiting for the softirq, then defer the
+        // expiry wakeup work (which takes the run-queue lock) to the per-CPU
+        // `timer-softirq` task so the IRQ returns quickly.
+        if scheduler_tick {
+            // Since irq and preemption are both disabled here, we can get
+            // the current run queue without another context transition.
+            current_run_queue::<crate::sync::RawState>().scheduler_timer_tick();
+        }
+        crate::timers::defer_timer_expiry(scheduler_tick);
+    }
+    #[cfg(not(feature = "sched-rt-fifo"))]
+    {
+        crate::timers::run_timer_expiry(scheduler_tick);
+        if scheduler_tick {
+            // Since irq and preemption are both disabled here, we can get
+            // the current run queue without another context transition.
+            current_run_queue::<crate::sync::RawState>().scheduler_timer_tick();
+        }
     }
 }
 
@@ -334,6 +378,20 @@ where
     spawn_raw(f, name, default_task_stack_size())
 }
 
+/// Spawns a realtime task with a name and the RT CPU affinity
+/// ([`rt_cpu_mask`]).
+pub fn spawn_with_name_rt<F>(f: F, name: String) -> AxTaskRef
+where
+    F: FnOnce() + Send + 'static,
+{
+    let rt_mask = rt_cpu_mask();
+    spawn_task_with(TaskInner::new(f, name, default_task_stack_size()), |task| {
+        if !rt_mask.is_empty() {
+            task.set_cpumask(rt_mask);
+        }
+    })
+}
+
 /// Spawns a new task with the default parameters.
 ///
 /// The default task name is an empty string. The default task stack size is
@@ -345,6 +403,19 @@ where
     F: FnOnce() + Send + 'static,
 {
     spawn_with_name(f, String::new())
+}
+
+/// Spawns a realtime task pinned to the RT CPU set (see [`rt_cpu_mask`]).
+///
+/// Under `sched-rt-fifo` with a configured `RT_CPUMASK`, this keeps realtime
+/// work off the host CPUs and conversely keeps non-realtime tasks off the RT
+/// cores (their default mask excludes [`rt_cpu_mask`]). When no RT CPU set is
+/// configured, the task is free to run on any CPU (no isolation).
+pub fn spawn_rt_task<F>(f: F) -> AxTaskRef
+where
+    F: FnOnce() + Send + 'static,
+{
+    spawn_with_name_rt(f, String::new())
 }
 
 /// Set the priority for current task.

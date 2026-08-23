@@ -568,6 +568,14 @@ pub(crate) fn select_run_queue<G: GuardState>(task: &AxTaskRef) -> AxRunQueueRef
     }
 }
 
+/// Re-queues a task whose effective priority changed so the realtime FIFO
+/// ready queue reorders it under its new key. Called from the mutex priority
+/// donation path after raising an owner's effective priority.
+#[cfg(feature = "sched-rt-fifo")]
+pub(crate) fn requeue_task_after_priority_change(task: &AxTaskRef) {
+    select_run_queue::<crate::sync::PreemptIrqSaveState>(task).requeue_task(task);
+}
+
 /// Selects a run queue for waking a blocked task.
 ///
 /// Unlike new task placement, wakeups prefer the CPU that performs the wakeup
@@ -694,7 +702,26 @@ impl<G: GuardState> AxRunQueueRef<G> {
         // critical section represented by `G`.
         unsafe { self.inner.scheduler.lock_raw() }.add_task(task);
         #[cfg(all(feature = "smp", feature = "ipi"))]
-        kick_remote_cpu(cpu_id);
+        {
+            // Under `sched-rt-fifo` a newly runnable task must reach a remote
+            // CPU without IPI coalescing delay, so request a forced reschedule.
+            #[cfg(feature = "sched-rt-fifo")]
+            force_kick_remote_cpu(cpu_id);
+            #[cfg(not(feature = "sched-rt-fifo"))]
+            kick_remote_cpu(cpu_id);
+        }
+    }
+
+    /// Removes and re-adds a task whose effective priority changed so the
+    /// scheduler reorders it under its new key. Used by the mutex priority
+    /// donation path after raising an owner's effective priority.
+    #[cfg(feature = "sched-rt-fifo")]
+    fn requeue_task(&mut self, task: &AxTaskRef) {
+        // SAFETY: `AxRunQueueRef<G>` owns the target run-queue critical section.
+        let mut scheduler = unsafe { self.inner.scheduler.lock_raw() };
+        if let Some(task) = scheduler.remove_task(task) {
+            scheduler.add_task(task);
+        }
     }
 
     /// Unblock one task by inserting it into the run queue.
@@ -729,7 +756,13 @@ impl<G: GuardState> AxRunQueueRef<G> {
                 crate::current().set_preempt_pending(true);
             }
             #[cfg(all(feature = "smp", feature = "ipi"))]
-            kick_remote_cpu(cpu_id);
+            {
+                // Same forced-kick rationale as `add_task` for RT wakes.
+                #[cfg(feature = "sched-rt-fifo")]
+                force_kick_remote_cpu(cpu_id);
+                #[cfg(not(feature = "sched-rt-fifo"))]
+                kick_remote_cpu(cpu_id);
+            }
         }
     }
 }
@@ -1059,11 +1092,36 @@ impl AxRunQueue {
     fn new(cpu_id: usize) -> Self {
         let gc_task =
             TaskInner::new(gc_entry, "gc".into(), crate::default_task_stack_size()).into_arc();
+        // The GC task must never preempt realtime work, so under the realtime
+        // FIFO scheduler it runs at the lowest possible priority.
+        #[cfg(feature = "sched-rt-fifo")]
+        gc_task.set_sched_priority(i32::MIN);
         // gc task should be pinned to the current CPU.
         gc_task.set_cpumask(AxCpuMask::one_shot(cpu_id));
 
+        // Under `sched-rt-fifo`, a per-CPU softirq task drains deferred timer
+        // expiry work armed by the hard timer IRQ so wakeup work does not run
+        // with IRQs disabled. It is pinned to this CPU and runs at
+        // [`TIMER_SOFTIRQ_PRIORITY`], above default-priority work but below
+        // realtime application tasks.
+        // TEMP BISECT: softirq task creation disabled to isolate 2c.
+        #[cfg(feature = "sched-rt-fifo")]
+        let timer_softirq_task = TaskInner::new(
+            timer_softirq_entry,
+            "timer-softirq".into(),
+            crate::default_task_stack_size(),
+        )
+        .into_arc();
+        #[cfg(feature = "sched-rt-fifo")]
+        {
+            timer_softirq_task.set_sched_priority(TIMER_SOFTIRQ_PRIORITY);
+            timer_softirq_task.set_cpumask(AxCpuMask::one_shot(cpu_id));
+        }
+
         let mut scheduler = Scheduler::new();
         scheduler.add_task(gc_task);
+        #[cfg(feature = "sched-rt-fifo")]
+        scheduler.add_task(timer_softirq_task);
         Self {
             cpu_id,
             scheduler: SpinLock::new(scheduler),
@@ -1341,6 +1399,27 @@ fn gc_entry() {
             ax_hal::percpu::with_cpu_pin(|pin| WAIT_FOR_EXIT.with_current(pin, WaitQueue::wait))
         }
         .expect("GC wait requires an installed CPU-local area");
+    }
+}
+
+/// Priority of the per-CPU `timer-softirq` task under `sched-rt-fifo`.
+///
+/// It sits above the default priority (`0`) so the deferred timer expiry
+/// work runs before ordinary tasks, but below realtime application tasks
+/// (which use higher priorities): a task woken by the expiry preempts the
+/// softirq at the next safe point, so the softirq only runs the wakeups and
+/// then yields to the woken realtime task.
+#[cfg(feature = "sched-rt-fifo")]
+const TIMER_SOFTIRQ_PRIORITY: i32 = 1;
+
+/// The per-CPU `timer-softirq` task routine. It drains deferred timer expiry
+/// armed by the hard timer IRQ, then blocks until more deferred work arrives.
+/// See [`crate::timers::defer_timer_expiry`].
+#[cfg(feature = "sched-rt-fifo")]
+fn timer_softirq_entry() {
+    loop {
+        crate::timers::drain_deferred_timer_expiry();
+        crate::timers::wait_for_deferred_timer_expiry();
     }
 }
 

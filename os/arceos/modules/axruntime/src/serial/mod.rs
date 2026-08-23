@@ -845,6 +845,12 @@ fn build_runtime(
         alloc::format!("serial{index}-maint"),
         ax_task::default_task_stack_size(),
     );
+    // Under `sched-rt-fifo`, the serial maintenance task must run at a higher
+    // priority than default-priority callers so the runtime console handoff
+    // completes during boot instead of stalling behind the main task on a
+    // single core.
+    #[cfg(feature = "sched-rt-fifo")]
+    task.set_sched_priority(40);
     task.set_cpumask(AxCpuMask::one_shot(primary_cpu));
 
     if let Some(binding) = shared.info.irq.clone() {

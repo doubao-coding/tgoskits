@@ -126,8 +126,30 @@ pub struct TaskInner {
     /// Scheduling policy of the task.
     sched_policy: AtomicI32,
 
-    /// Scheduling priority of the task.
-    sched_priority: AtomicI32,
+    /// Base scheduling priority configured by the caller.
+    base_sched_priority: AtomicI32,
+
+    /// Effective scheduling priority observed by the scheduler, equal to the
+    /// maximum of the base priority and any temporary boost.
+    effective_sched_priority: AtomicI32,
+
+    /// Highest temporary mutex priority donation, or `i32::MIN` when absent.
+    /// Only present under `sched-rt-fifo`, where the sleepable mutex performs
+    /// priority inheritance to bound priority inversion.
+    #[cfg(feature = "sched-rt-fifo")]
+    donated_sched_priority: AtomicI32,
+
+    /// Task id of the mutex owner this task is currently blocked on, or `0`
+    /// when not blocked on a mutex. Used to propagate priority donation
+    /// along a contended mutex chain.
+    #[cfg(feature = "sched-rt-fifo")]
+    mutex_wait_owner_id: AtomicU64,
+
+    /// Lock addresses (`RawMutex::addr()`) of mutexes currently held by this
+    /// task. Used to recompute priority donation after releasing one mutex so
+    /// donations from other still-held mutexes are not lost.
+    #[cfg(feature = "sched-rt-fifo")]
+    held_mutexes: crate::sync::SpinLock<alloc::vec::Vec<(usize, i32)>>,
 
     /// Mark whether the task is in the wait queue.
     in_wait_queue: AtomicBool,
@@ -192,6 +214,16 @@ impl TaskId {
     /// Convert the task ID to a `u64`.
     pub const fn as_u64(&self) -> u64 {
         self.0
+    }
+
+    /// Reconstructs a `TaskId` from its `u64` representation.
+    ///
+    /// Used by the mutex priority-inheritance path to walk a contended owner
+    /// chain stored as raw task ids. The caller must ensure `id` came from
+    /// [`as_u64`](Self::as_u64) of a live task.
+    #[cfg(feature = "sched-rt-fifo")]
+    pub(crate) const fn from_u64(id: u64) -> Self {
+        Self(id)
     }
 }
 
@@ -338,14 +370,114 @@ impl TaskInner {
         self.sched_policy.store(policy, Ordering::Release)
     }
 
+    /// Returns the effective scheduling priority observed by the scheduler.
+    ///
+    /// Under `sched-rt-fifo` this is the maximum of the base priority and any
+    /// temporary mutex priority donation; otherwise it equals the base priority.
     #[inline]
     pub fn sched_priority(&self) -> i32 {
-        self.sched_priority.load(Ordering::Acquire)
+        self.effective_sched_priority.load(Ordering::Acquire)
+    }
+
+    /// Sets the base scheduling priority and refreshes the effective priority.
+    #[inline]
+    pub fn set_sched_priority(&self, prio: i32) {
+        self.base_sched_priority.store(prio, Ordering::Release);
+        self.refresh_effective_sched_priority();
+    }
+
+    /// Donates a temporary priority boost to this task, used by the mutex
+    /// priority-inheritance path to raise a contended owner above its base
+    /// priority. The donation is monotonic: only a value higher than the
+    /// current donation is accepted.
+    #[inline]
+    #[cfg(feature = "sched-rt-fifo")]
+    pub(crate) fn donate_sched_priority(&self, priority: i32) {
+        let mut donated = self.donated_sched_priority.load(Ordering::Acquire);
+        while priority > donated {
+            match self.donated_sched_priority.compare_exchange_weak(
+                donated,
+                priority,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => donated = current,
+            }
+        }
+        self.refresh_effective_sched_priority();
     }
 
     #[inline]
-    pub fn set_sched_priority(&self, prio: i32) {
-        self.sched_priority.store(prio, Ordering::Release)
+    #[cfg(feature = "sched-rt-fifo")]
+    pub(crate) fn mutex_wait_owner_id(&self) -> u64 {
+        self.mutex_wait_owner_id.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    #[cfg(feature = "sched-rt-fifo")]
+    pub(crate) fn set_mutex_wait_owner_id(&self, owner_id: u64) {
+        self.mutex_wait_owner_id.store(owner_id, Ordering::Release);
+    }
+
+    #[inline]
+    #[cfg(feature = "sched-rt-fifo")]
+    pub(crate) fn clear_mutex_wait_owner_id(&self) {
+        self.mutex_wait_owner_id.store(0, Ordering::Release);
+    }
+
+    /// Records that this task acquired the mutex at `lock_addr`, so a later
+    /// release can recompute donation from the remaining held mutexes.
+    #[cfg(feature = "sched-rt-fifo")]
+    pub(crate) fn register_held_mutex(&self, lock_addr: usize) {
+        self.held_mutexes.lock_irqsave().push((lock_addr, i32::MIN));
+    }
+
+    /// Raises the cached top-waiter priority of this task's held entry for
+    /// `lock_addr`. Called by a waiter blocking on a mutex this task owns so
+    /// the owner's eventual release recomputation sees the waiter's priority.
+    #[cfg(feature = "sched-rt-fifo")]
+    pub(crate) fn bump_held_top_waiter(&self, lock_addr: usize, priority: i32) {
+        let mut held = self.held_mutexes.lock_irqsave();
+        if let Some((_, top)) = held.iter_mut().find(|(addr, _)| *addr == lock_addr)
+            && priority > *top
+        {
+            *top = priority;
+        }
+    }
+
+    /// Removes `lock_addr` from this task's held mutexes and recomputes the
+    /// donation from the still-held mutexes' cached top-waiter priorities.
+    /// Called by a mutex owner on release instead of blindly clearing all
+    /// donation, so a still-held mutex's donation survives releasing another.
+    #[cfg(feature = "sched-rt-fifo")]
+    pub(crate) fn deregister_held_mutex_and_recompute(&self, lock_addr: usize) {
+        let top = {
+            let mut held = self.held_mutexes.lock_irqsave();
+            if let Some(pos) = held.iter().position(|(addr, _)| *addr == lock_addr) {
+                held.swap_remove(pos);
+            }
+            held.iter().map(|(_, top)| *top).max().unwrap_or(i32::MIN)
+        };
+        self.donated_sched_priority.store(top, Ordering::Release);
+        self.refresh_effective_sched_priority();
+        // The owner releasing a mutex is the current task; requeue it so the
+        // scheduler observes the recomputed effective priority. Guarded for
+        // host-test, where no current task is installed.
+        if let Some(curr) = crate::current_may_uninit() {
+            crate::run_queue::requeue_task_after_priority_change(&curr);
+        }
+    }
+
+    #[inline]
+    fn refresh_effective_sched_priority(&self) {
+        let base = self.base_sched_priority.load(Ordering::Acquire);
+        #[cfg(feature = "sched-rt-fifo")]
+        let donated = self.donated_sched_priority.load(Ordering::Acquire);
+        #[cfg(not(feature = "sched-rt-fifo"))]
+        let donated = i32::MIN;
+        self.effective_sched_priority
+            .store(base.max(donated), Ordering::Release);
     }
 
     /// Polls whether the task has been interrupted.
@@ -411,6 +543,24 @@ impl TaskInner {
     }
 }
 
+/// Bridges the task's effective priority into the realtime FIFO scheduler's
+/// `RtPriority` capability boundary. The scheduler reads the effective
+/// priority (including any mutex donation) via `rt_priority` and writes the
+/// base priority via `set_rt_priority`.
+impl ax_sched::RtPriority for TaskInner {
+    fn rt_priority(&self) -> isize {
+        self.sched_priority() as isize
+    }
+
+    fn set_rt_priority(&self, priority: isize) -> bool {
+        let Ok(priority) = i32::try_from(priority) else {
+            return false;
+        };
+        self.set_sched_priority(priority);
+        true
+    }
+}
+
 // private methods
 impl TaskInner {
     fn new_common(id: TaskId, name: String, kstack: TaskStack) -> Self {
@@ -424,7 +574,14 @@ impl TaskInner {
             // By default, the task is allowed to run on all CPUs.
             cpumask: SpinLock::new(crate::api::cpu_mask_full()),
             sched_policy: AtomicI32::new(0),
-            sched_priority: AtomicI32::new(0),
+            base_sched_priority: AtomicI32::new(0),
+            effective_sched_priority: AtomicI32::new(0),
+            #[cfg(feature = "sched-rt-fifo")]
+            donated_sched_priority: AtomicI32::new(i32::MIN),
+            #[cfg(feature = "sched-rt-fifo")]
+            mutex_wait_owner_id: AtomicU64::new(0),
+            #[cfg(feature = "sched-rt-fifo")]
+            held_mutexes: crate::sync::SpinLock::new(alloc::vec::Vec::new()),
             in_wait_queue: AtomicBool::new(false),
             #[cfg(feature = "irq")]
             timer_ticket_id: AtomicU64::new(0),

@@ -107,6 +107,14 @@ impl RawMutex {
     }
 
     #[inline(always)]
+    fn lock_key(&self) -> usize {
+        // Stable per `RawMutex` instance; used as the per-mutex key for the
+        // held-mutex priority-inheritance registry. The mutex outlives every
+        // held guard, so the key is valid while registered.
+        core::ptr::from_ref(self) as usize
+    }
+
+    #[inline(always)]
     #[track_caller]
     fn lock(&self) {
         #[cfg(feature = "lockdep")]
@@ -145,12 +153,18 @@ impl RawMutex {
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return,
+                Ok(_) => {
+                    clear_current_mutex_wait_owner();
+                    #[cfg(feature = "sched-rt-fifo")]
+                    register_held_mutex_current(self.lock_key());
+                    return;
+                }
                 Err(owner_id) => {
                     assert_ne!(
                         owner_id, current_id,
                         "task {current_id} tried to recursively acquire a mutex"
                     );
+                    donate_owner_priority(owner_id, self.lock_key());
                     ActiveMutexOps::wait_until_unlocked(&self.wait_queue, &self.owner_id);
                 }
             }
@@ -177,6 +191,12 @@ impl RawMutex {
         #[cfg(feature = "lockdep")]
         lockdep.finish(acquired);
 
+        if acquired {
+            clear_current_mutex_wait_owner();
+            #[cfg(feature = "sched-rt-fifo")]
+            register_held_mutex_current(self.lock_key());
+        }
+
         acquired
     }
 
@@ -192,6 +212,10 @@ impl RawMutex {
         #[cfg(feature = "lockdep")]
         crate::sync::lockdep::mutex::release(self);
 
+        #[cfg(feature = "sched-rt-fifo")]
+        deregister_held_mutex_and_recompute_current(self.lock_key());
+        #[cfg(not(feature = "sched-rt-fifo"))]
+        clear_current_priority_donation();
         self.owner_id.store(0, Ordering::Release);
         ActiveMutexOps::wake_one(&self.wait_queue);
     }
@@ -206,6 +230,87 @@ impl RawMutex {
     #[doc(hidden)]
     pub unsafe fn force_unlock(&self) {
         unsafe { self.unlock() };
+    }
+}
+
+/// Donates the current task's effective priority to the mutex owner and walks
+/// the contended owner chain so a higher-priority waiter's urgency reaches
+/// every owner up to the root. Only active under `sched-rt-fifo`; a no-op
+/// otherwise so the plain mutex path stays unchanged.
+#[cfg(feature = "sched-rt-fifo")]
+fn donate_owner_priority(owner_id: u64, lock_key: usize) {
+    let Some(waiter) = crate::current_may_uninit() else {
+        // No current task means there is no waiter identity to donate from
+        // (e.g. a host-test unit test exercising `force_unlock` outside the
+        // scheduler). Donation only matters when a real task is blocking.
+        return;
+    };
+    let waiter_priority = waiter.sched_priority();
+    waiter.set_mutex_wait_owner_id(owner_id);
+    // Record this waiter's priority in the owner's held-entry for this mutex
+    // so a later release of *another* mutex recomputes donation including it.
+    if let Some(owner) = crate::task_by_id(crate::TaskId::from_u64(owner_id)) {
+        owner.bump_held_top_waiter(lock_key, waiter_priority);
+    }
+    donate_priority_chain(owner_id, waiter_priority, waiter.id().as_u64());
+}
+
+#[cfg(feature = "sched-rt-fifo")]
+fn donate_priority_chain(mut owner_id: u64, priority: i32, waiter_id: u64) {
+    // Bound the walk by the maximum possible owner chain length so a corrupted
+    // or cyclic wait relation cannot loop forever.
+    for _ in 0..crate::build_info::CPU_CAPACITY.max(32) {
+        if owner_id == 0 || owner_id == waiter_id {
+            return;
+        }
+        let Some(owner) = crate::task_by_id(crate::TaskId::from_u64(owner_id)) else {
+            return;
+        };
+        owner.donate_sched_priority(priority);
+        crate::run_queue::requeue_task_after_priority_change(&owner);
+        owner_id = owner.mutex_wait_owner_id();
+    }
+}
+
+#[cfg(not(feature = "sched-rt-fifo"))]
+fn donate_owner_priority(_owner_id: u64, _lock_key: usize) {}
+
+/// Clears the current task's priority donation after it releases a mutex.
+/// Under `sched-rt-fifo` the release path instead recomputes donation from
+/// remaining held mutexes (`deregister_held_mutex_and_recompute_current`),
+/// so this is only the no-op for non-realtime configurations.
+#[cfg(not(feature = "sched-rt-fifo"))]
+fn clear_current_priority_donation() {}
+
+/// Clears the mutex owner the current task was waiting on, once it has
+/// acquired the mutex. Stops a later donation chain from following a stale
+/// wait relation.
+#[cfg(feature = "sched-rt-fifo")]
+fn clear_current_mutex_wait_owner() {
+    if let Some(curr) = crate::current_may_uninit() {
+        curr.clear_mutex_wait_owner_id();
+    }
+}
+
+#[cfg(not(feature = "sched-rt-fifo"))]
+fn clear_current_mutex_wait_owner() {}
+
+/// Records the mutex at `lock_key` as held by the current task. Guarded for
+/// host-test, where no current task is installed.
+#[cfg(feature = "sched-rt-fifo")]
+fn register_held_mutex_current(lock_key: usize) {
+    if let Some(curr) = crate::current_may_uninit() {
+        curr.register_held_mutex(lock_key);
+    }
+}
+
+/// Removes the mutex at `lock_key` from the current task's held registry and
+/// recomputes its donation from the remaining held mutexes. Guarded for
+/// host-test.
+#[cfg(feature = "sched-rt-fifo")]
+fn deregister_held_mutex_and_recompute_current(lock_key: usize) {
+    if let Some(curr) = crate::current_may_uninit() {
+        curr.deregister_held_mutex_and_recompute(lock_key);
     }
 }
 

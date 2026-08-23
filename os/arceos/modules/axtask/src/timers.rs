@@ -19,6 +19,17 @@ percpu_static! {
     TIMER_IRQ_CALLBACKS: Vec<Box<dyn Fn(TimeValue) + Send + Sync>> = Vec::new(),
     TIMER_DEADLINE_SOURCES: Vec<Box<dyn Fn() -> Option<u64> + Send + Sync>> = Vec::new(),
     PROGRAMMED_DEADLINE_NANOS: u64 = 0,
+    /// Deferred timer-expiry intent armed by the hard timer IRQ and drained by
+    /// the per-CPU `timer-softirq` task. Only present under `sched-rt-fifo`,
+    /// where wakeup work is moved out of the hard IRQ to bound IRQ-off time.
+    /// 0 = no deferred work, 1 = expiry without periodic callbacks, 2 = expiry
+    /// with periodic callbacks.
+    #[cfg(feature = "sched-rt-fifo")]
+    TIMER_EXPIRY_DEFERRED: core::sync::atomic::AtomicI8 = core::sync::atomic::AtomicI8::new(0),
+    /// Wait queue the hard timer IRQ notifies to wake the per-CPU
+    /// `timer-softirq` task that drains [`TIMER_EXPIRY_DEFERRED`].
+    #[cfg(feature = "sched-rt-fifo")]
+    TIMER_SOFTIRQ_WQ: crate::WaitQueue = crate::WaitQueue::new(),
 }
 
 struct TaskWakeupEvent {
@@ -108,7 +119,7 @@ fn check_callbacks() {
     });
 }
 
-fn check_irq_callbacks() {
+pub(crate) fn check_irq_callbacks() {
     with_local_pin(|pin| {
         TIMER_IRQ_CALLBACKS.with_current(pin, |callbacks| {
             for callback in callbacks {
@@ -198,10 +209,23 @@ pub(crate) fn set_alarm_wakeup(deadline: TimeValue, task: AxTaskRef) {
     maybe_reprogram_timer(deadline);
 }
 
-// SAFETY: only called in timer irq handler, so irq and preemption are
-// both disabled here.
-pub fn check_events(run_callbacks: bool) {
+/// Synchronous timer expiry entry used by the non-deferred path and kept
+/// available for tests: run IRQ-context callbacks then the deferred expiry
+/// body in one call. Unused under `sched-rt-fifo`, where the hard IRQ defers
+/// instead.
+#[allow(dead_code)]
+pub(crate) fn check_events(run_callbacks: bool) {
     check_irq_callbacks();
+    run_timer_expiry(run_callbacks);
+}
+
+/// Runs the deferred part of timer expiry: periodic tick callbacks, the
+/// per-CPU timer-list expiry loop (which wakes tasks), and async timer
+/// events. Under `sched-rt-fifo` this runs in a high-priority softirq task
+/// instead of the hard timer IRQ so the IRQ returns quickly and wakeup work
+/// (which takes the run-queue lock and may wake remote CPUs) does not
+/// lengthen IRQ-off time.
+pub(crate) fn run_timer_expiry(run_callbacks: bool) {
     if run_callbacks {
         check_callbacks();
     }
@@ -219,6 +243,116 @@ pub fn check_events(run_callbacks: bool) {
 
     // Handle async timer events
     crate::future::check_timer_events();
+}
+
+/// Deferred timer-expiry state armed by the hard timer IRQ and drained by the
+/// per-CPU `timer-softirq` task. Only built under `sched-rt-fifo`.
+#[cfg(feature = "sched-rt-fifo")]
+mod deferred {
+    use core::sync::atomic::{AtomicI8, Ordering};
+
+    /// Deferred-expiry intent: `0` means none, `1` means drain expiry without
+    /// periodic callbacks, `2` means drain expiry with periodic callbacks.
+    /// A higher value coalesces a lower one so a later deferral that carries
+    /// periodic-callback work is not lost behind an earlier no-callback deferral.
+    pub(super) const INTENT_NONE: i8 = 0;
+    pub(super) const INTENT_NO_CALLBACKS: i8 = 1;
+    pub(super) const INTENT_WITH_CALLBACKS: i8 = 2;
+
+    #[inline]
+    pub(super) fn intent_for(run_callbacks: bool) -> i8 {
+        if run_callbacks {
+            INTENT_WITH_CALLBACKS
+        } else {
+            INTENT_NO_CALLBACKS
+        }
+    }
+
+    /// Arms deferred expiry by raising the per-CPU intent, returning the
+    /// previous value so the caller can decide whether to wake the softirq
+    /// task (only on the no-pending → pending transition).
+    #[inline]
+    pub(super) fn arm(slot: &AtomicI8, intent: i8) -> i8 {
+        let mut current = slot.load(Ordering::Acquire);
+        while intent > current {
+            match slot.compare_exchange_weak(current, intent, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return current,
+                Err(observed) => current = observed,
+            }
+        }
+        current
+    }
+
+    /// Drains the per-CPU intent, returning whether periodic callbacks must
+    /// run together with the expiry loop.
+    #[inline]
+    pub(super) fn drain(slot: &AtomicI8) -> Option<bool> {
+        let intent = slot.swap(INTENT_NONE, Ordering::AcqRel);
+        if intent == INTENT_NONE {
+            None
+        } else {
+            Some(intent == INTENT_WITH_CALLBACKS)
+        }
+    }
+
+    #[inline]
+    pub(super) fn is_pending(slot: &AtomicI8) -> bool {
+        slot.load(Ordering::Acquire) != INTENT_NONE
+    }
+}
+
+/// Arms deferred timer expiry on the current CPU and wakes the per-CPU
+/// `timer-softirq` task to drain it. Called from the hard timer IRQ under
+/// `sched-rt-fifo` instead of running [`run_timer_expiry`] synchronously.
+#[cfg(feature = "sched-rt-fifo")]
+pub(crate) fn defer_timer_expiry(run_callbacks: bool) {
+    let intent = deferred::intent_for(run_callbacks);
+    let armed = with_local_pin(|pin| {
+        TIMER_EXPIRY_DEFERRED.with_current(pin, |slot| deferred::arm(slot, intent))
+    });
+    // Wake the softirq task only on the no-pending -> pending transition so a
+    // still-draining softirq picks up the new intent in its drain loop and we
+    // avoid a redundant wake otherwise.
+    if armed == deferred::INTENT_NONE {
+        with_local_pin(|pin| {
+            TIMER_SOFTIRQ_WQ.with_current(pin, |wq| wq.notify_one(true));
+        });
+    }
+}
+
+/// Drains all pending deferred timer expiry on the current CPU. Called by the
+/// per-CPU `timer-softirq` task after it wakes.
+#[cfg(feature = "sched-rt-fifo")]
+pub(crate) fn drain_deferred_timer_expiry() {
+    loop {
+        let pending =
+            with_local_pin(|pin| TIMER_EXPIRY_DEFERRED.with_current(pin, deferred::drain));
+        match pending {
+            Some(run_callbacks) => run_timer_expiry(run_callbacks),
+            None => break,
+        }
+    }
+}
+
+/// Blocks the per-CPU `timer-softirq` task until deferred timer expiry is
+/// pending again. The condition is re-checked under the wait-queue lock so a
+/// deferral armed between the drain and the wait cannot be lost.
+#[cfg(feature = "sched-rt-fifo")]
+pub(crate) fn wait_for_deferred_timer_expiry() {
+    // Do NOT wrap in a `PreemptIrqSaveGuard` here: `WaitQueue::wait_until` ->
+    // `blocked_resched` asserts `can_preempt(2)` and supplies the two guards it
+    // expects itself (`PreemptIrqSaveState` from `current_run_queue` plus the
+    // wait queue's IRQ-save lock). An outer guard would raise the count to 3
+    // and trip the assertion, which is exactly why this crashed early boot.
+    // Mirror the GC task's wait path, which uses a bare CPU pin.
+    unsafe {
+        ax_hal::percpu::with_cpu_pin(|pin| {
+            TIMER_SOFTIRQ_WQ.with_current(pin, |wq| {
+                wq.wait_until(|| TIMER_EXPIRY_DEFERRED.with_current(pin, deferred::is_pending))
+            })
+        })
+    }
+    .expect("timer-softirq wait requires an installed CPU-local area");
 }
 
 fn with_local_pin<R>(
@@ -254,5 +388,44 @@ mod tests {
     #[test]
     fn consumed_timer_irq_allows_a_later_live_deadline() {
         assert!(timer_request_requires_reprogramming(0, 200));
+    }
+
+    // The deferred-expiry intent state machine is pure atomics, so its
+    // coalescing and drain semantics can be validated without a real timer
+    // IRQ or the per-CPU softirq task.
+    #[cfg(feature = "sched-rt-fifo")]
+    #[test]
+    fn deferred_intent_coalesces_and_drains() {
+        use core::sync::atomic::AtomicI8;
+
+        use super::deferred;
+
+        let slot = AtomicI8::new(deferred::INTENT_NONE);
+
+        // A no-pending -> pending transition reports the previous none state
+        // so the caller wakes the softirq task.
+        assert_eq!(
+            deferred::arm(&slot, deferred::INTENT_NO_CALLBACKS),
+            deferred::INTENT_NONE
+        );
+        // Arming again while pending does not re-report the transition.
+        assert_eq!(
+            deferred::arm(&slot, deferred::INTENT_NO_CALLBACKS),
+            deferred::INTENT_NO_CALLBACKS
+        );
+        // A with-callback deferral coalesces over the no-callback one so
+        // periodic callbacks are not lost behind an earlier deferral.
+        deferred::arm(&slot, deferred::INTENT_WITH_CALLBACKS);
+        let drained = deferred::drain(&slot).expect("pending intent must drain");
+        assert!(
+            drained,
+            "a coalesced with-callback deferral must request periodic callbacks",
+        );
+        assert_eq!(
+            slot.load(core::sync::atomic::Ordering::Acquire),
+            deferred::INTENT_NONE
+        );
+        // Draining with no pending intent returns none.
+        assert!(deferred::drain(&slot).is_none());
     }
 }
