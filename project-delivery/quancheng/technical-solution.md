@@ -100,9 +100,18 @@ Axvisor 作为统一底座，负责把智能侧 guest 与实时侧 CPU 放在同
 
 ### 3.1 任务目标
 
-任务一的目标是为同一硬件上的智能侧 guest 和实时控制任务建立可解释、可验证的隔离底座。智能侧需要运行 StarryOS、Python、NPU 推理、文件系统和网络协议等通用负载；控制侧则需要稳定执行双轮足机器人的 8ms 平衡闭环。两类负载的实时性要求不同，不能简单把控制任务放进普通 guest 中再依赖虚拟化调度来兜底。
+任务一的目标是为同一硬件上的智能侧 guest 和实时控制任务建立可解释、可验证的隔离底座。智能侧需要运行 StarryOS、Python、NPU 推理、文件系统和网络协议等通用负载；控制侧则需要稳定执行双轮足机器人的 8ms 平衡闭环。两类负载的实时性要求不同，不能简单把控制任务放进普通 guest 中，再依赖 vCPU 调度、虚拟中断和普通宿主任务共同竞争 CPU 时间。
 
-因此，任务一先验证三种实时承载方式的差异，再确定 AMP 作为最终方案：智能侧仍作为 Axvisor guest 运行，实时侧由 Axvisor 预留 CPU 直接承载关键控制路径。该目标对应两个层次的能力建设：Axvisor 层要提供实时 CPU 预留和隔离；ArceOS/实时任务层要补齐 RT FIFO 调度和 mutex 优先级继承，避免控制任务在本地调度和锁等待中被普通任务拖慢。
+本方案以 4 个物理核心为基准，将 `pCPU0..2` 划为虚拟化域，固定承载 Axvisor 普通运行时和 StarryOS 的 3 个 vCPU；将 `pCPU3` 划为实时域，直接运行 Axvisor/ArceOS 宿主中的实时任务。实时任务不经过 guest world switch，也不与 vCPU 共享 run queue。该形态属于单一 Axvisor 镜像内的静态 CPU 分区式 AMP：CPU 和调度域被隔离，但实时任务仍与 Axvisor 共享宿主地址空间，因此第一阶段提供的是调度与资源所有权隔离，而不是双镜像 AMP 的故障隔离。
+
+任务一的成功标准不是“创建一个高优先级任务”，而是同时满足以下条件：
+
+- StarryOS 看到 3 个 vCPU，且对应 vCPU task 只能运行在 `pCPU0..2`。
+- 实时任务只能运行在 `pCPU3`，不会迁移到虚拟化域。
+- 普通 Axvisor worker、虚拟设备后端、文件系统、网络和控制台任务不能进入 `pCPU3`。
+- 非实时外部 IRQ 不路由到 `pCPU3`；该核只处理本地实时 timer、实时设备 IRQ 和明确允许的 doorbell/IPI。
+- 在 StarryOS CPU、网络和存储压力下，实时周期任务仍能报告可复现的最大唤醒时延、执行抖动和 deadline miss 数。
+- AMP 功能默认关闭；关闭后现有 Axvisor 的 CPU、VM、IRQ 和测试行为保持不变。
 
 ### 3.2 验证 bare、guest 与 AMP 方案实时性差异
 
@@ -116,7 +125,9 @@ Axvisor 作为统一底座，负责把智能侧 guest 与实时侧 CPU 放在同
 
 真机 RK3588 上，Axvisor AMP 路径进一步体现出实时控制优势：任务切换平均 `1066 ns`，抢占平均 `1023 ns`，中断平均 `654 ns`，信号量 shuffle 平均 `1022 ns`，1ms tick jitter 为 `4084 ns`。`4084 ns` 只占 8ms 控制周期约 `0.0511%`，为 EKF/LQR 控制计算、MPU6050 读取、Lingkong 电机 UART 事务和安全降级逻辑留下主要时间预算。
 
-基于上述验证，任务一选择 AMP 而不是“控制侧 RTOS guest”作为实时控制方案，并提出 [#2160](https://github.com/rcore-os/tgoskits/pull/2160)：在 Axvisor/runtime 边界增加实时 CPU 预留能力，使智能侧 guest 的 vCPU、虚拟设备 I/O 和普通任务不能占用实时控制路径所需的 CPU 时间。#2160 是任务一的隔离主线，后续调度和同步改造都服务于这个预留实时 CPU 上的控制任务。
+基于上述验证，任务一选择 AMP 而不是“控制侧 RTOS guest”作为第一阶段实时控制方案。保持现状的 RTOS guest 方案虽然隔离边界更清楚，但控制周期仍经过 vCPU 调度、VM exit/entry 和虚拟中断；完全独立的裸机 RT 镜像具有更强故障隔离，却需要重新设计固件启动、内存划分、中断控制器所有权和跨镜像通信。静态 CPU 分区式 AMP 能复用现有 `axtask`、AxVM vCPU affinity 和 IRQ framework，以较小改动先形成可测量闭环。
+
+[#2160](https://github.com/rcore-os/tgoskits/pull/2160) 已建立 Axvisor 实时 CPU 所有权和 secondary CPU 启动分流的设计基础，但其独立 RT runtime 路线明确不初始化普通 `ax_task`。本方案以 [#2161](https://github.com/rcore-os/tgoskits/pull/2161) 的 RT FIFO 为调度基础，因此集成时不能直接让 `pCPU3` 跳入无调度器的静态 park/executor 路径，而应为 `pCPU3` 保留一个受限的单核 `axtask` 调度域。#2160 的 CPU 所有权、VM placement 校验和资源排除原则继续复用；RT CPU 是否初始化 `axtask` 则由本方案重新明确。
 
 ### 3.3 ArceOS 实时性能力缺口
 
@@ -126,21 +137,144 @@ AMP 方案确定后，还需要检查预留 CPU 上的 ArceOS/实时任务能力
 
 这些缺口说明 mailbox 只能作为智能侧到实时侧的命令通道，不能替代调度器和同步原语的实时语义。完整实时路径需要同时满足三个条件：ready queue 按有效优先级选择任务；timer tick 能在更高优先级任务 ready 时请求重调度；mutex 争用时能让 owner 临时继承 waiter 的优先级。
 
-### 3.4 解决方案：RT FIFO 调度与 mutex 优先级继承
+单核 RT FIFO 也不能单独完成 AMP 隔离。当前普通任务默认可以使用完整 CPU mask，vCPU affinity 只约束 vCPU task，自身不会排除控制台、块设备、网络、VM 管理和其他后台任务。若这些任务仍能进入 `pCPU3`，或者普通设备 IRQ 仍路由到该核，即使实时任务优先级最高，也会受到硬中断、共享锁、内存分配和 cache/memory bus 争用影响。因此任务一必须把 CPU、任务、IRQ、内存和通信所有权作为一个整体设计。
+
+### 3.4 方案比较与架构选择
+
+| 方案 | 实时路径 | 优点 | 主要代价 | 结论 |
+| --- | --- | --- | --- | --- |
+| StarryOS/RTOS guest | 控制任务运行在 vCPU 中 | VM 隔离清楚，软件栈完整 | 经过 vCPU 调度、虚拟中断和 VM exit/entry | 保留为对照基线 |
+| 全部物理核使用普通 SMP 调度 | RT task 与 vCPU/host task 共享 CPU 集 | 改动最少 | 无法给出可解释的最坏时延边界 | 不采用 |
+| 静态 CPU 分区 + 单核 RT FIFO | `pCPU0..2` 运行 vCPU，`pCPU3` 运行宿主 RT task | 复用现有调度、绑核和 IRQ 能力，易形成最小闭环 | 与 Axvisor 共享地址空间和部分硬件资源 | 第一阶段采用 |
+| 独立 RT runtime/静态 executor | `pCPU3` 不初始化 `axtask` | 热路径更小，隔离更强 | 无法直接复用 #2161/#2162，需独立 timer、executor 和同步模型 | 后续演进方案 |
+| 独立裸机 RT 镜像 | 固件分别启动 Axvisor 与 RTOS | 故障和内存隔离最强 | 启动、内存、IRQ、设备和通信所有权改造最大 | 严格硬实时阶段评估 |
+
+第一阶段采用“静态 CPU 分区 + 单核 RT FIFO”。它并不承诺完整的多核全局实时调度：实时调度域只有 `pCPU3` 一个核，所有 RT task 的 CPU mask 都是 `0b1000`，因此无需跨 CPU RT push/pull、远程优先级抢占或 RT task 迁移。`pCPU0..2` 上的 vCPU 和 housekeeping task 仍是普通任务，不能通过提高优先级进入实时域。
+
+### 3.5 CPU 分区、启动和调度设计
+
+CPU 分区必须是系统唯一事实源，不能由 VM 配置、调度器、IRQ 和设备模块分别硬编码“最后一个核”。建议在 Axvisor/runtime 边界定义经过验证的分区对象：
+
+```rust
+pub struct CpuPartition {
+    virtualization: AxCpuMask,
+    realtime: AxCpuMask,
+}
+```
+
+4 核默认 AMP 配置为：
+
+```text
+virtualization_cpu_mask = 0b0111  # pCPU0..2
+realtime_cpu_mask       = 0b1000  # pCPU3
+
+Starry vCPU0 -> 0b0001
+Starry vCPU1 -> 0b0010
+Starry vCPU2 -> 0b0100
+RT task      -> 0b1000
+```
+
+启动时必须验证两个 mask 非空、互不相交、并集不超出平台实际 online CPU 集，且第一阶段 realtime mask 恰好包含一个非 BSP CPU。非法配置应在启动 VM 或创建实时任务前返回可诊断错误，不能静默裁剪、重映射或回退到完整 CPU mask。
+
+```mermaid
+flowchart TD
+    Boot[固件发现 4 个物理 CPU] --> Validate[验证 CpuPartition]
+    Validate --> Virt[pCPU0..2 虚拟化域]
+    Validate --> RT[pCPU3 实时域]
+    Virt --> Host[Axvisor housekeeping]
+    Virt --> V0[Starry vCPU0]
+    Virt --> V1[Starry vCPU1]
+    Virt --> V2[Starry vCPU2]
+    RT --> RQ[单核 RtFifoScheduler]
+    RQ --> Control[8ms 控制任务]
+    RQ --> RtEvent[实时事件任务]
+```
+
+所有 secondary CPU 先完成 per-CPU area、trap vector、local interrupt controller 和 CPU-local timer 所需的最小初始化，再按 CPU 所有权进入不同路径。`pCPU0..2` 完成现有 Axvisor SMP、IPI、block runtime 和普通 scheduler 初始化；`pCPU3` 只建立受限 RT run queue、RT timer 和通信端点，不发布为普通任务可选 CPU。普通 runtime 的 ready 计数、IPI readiness、block hctx 扩展和 `available_parallelism()` 必须使用虚拟化域，而不是物理 CPU 总数。
+
+AxVM 已支持通过 `phys_cpu_sets` 给 vCPU task 设置 CPU mask。VM 配置必须把 3 个 vCPU 分别固定到 `0b0001`、`0b0010` 和 `0b0100`，并在 `build_axvm_config()` 或等价的 placement 校验边界拒绝任何包含 realtime mask 的 vCPU 配置。普通 Axvisor task 的默认 mask 也必须从“全部在线 CPU”改为 virtualization mask；实时 task 则只能通过专门入口创建，在第一次入队前同时设置 `realtime` mask 和 RT priority。
+
+### 3.6 RT FIFO、优先级继承与实时任务约束
 
 针对 ArceOS 调度缺口，[#2161](https://github.com/rcore-os/tgoskits/pull/2161) 在 `components/axsched/src/rt_fifo.rs` 中新增 `RtFifoScheduler`。它通过 `RtPriority::rt_priority()` 获取任务有效优先级，并用 `(Reverse(priority), enqueue_order)` 维护 ready queue。这样高优先级任务总是先于低优先级任务被选中，同优先级任务仍保持 FIFO 入队顺序，符合实时 FIFO 的基本语义。
 
-`sched-rt-fifo` 通过 feature 接入 `axtask` 和 `ax-std`，不会替换默认 FIFO、RR 或 CFS 路径。当前实现限定在 `SMP=1`，用于预留实时 CPU 上的单核控制任务；多核全局实时调度仍需要后续处理跨 CPU push/pull、远程抢占和任务迁移协议。
+`sched-rt-fifo` 通过 feature 接入 `axtask` 和 `ax-std`。当前实现限定在 `SMP=1`；本方案通过单核 realtime domain 保持这一约束，而不是把它解释为整个 Axvisor 只能使用一个 CPU。集成实现需要让 scheduler 选择成为 run queue/domain 属性，或者提供等价的受限 RT run queue，避免强迫 `pCPU0..2` 的普通任务也承担 RT FIFO 语义。若第一阶段为了缩小改动暂时让所有 run queue 使用同一 scheduler，则必须用 CPU partition 阻止 RT task 和普通 task 跨域，并把“按 domain 选择 scheduler”记录为后续收敛项。
 
 针对 mutex 优先级反转，[#2162](https://github.com/rcore-os/tgoskits/pull/2162) 在 #2161 的 RT FIFO 基础上为 `axtask` mutex 路径加入 priority inheritance。它区分基础优先级和捐赠优先级，使高优先级 waiter 阻塞时可以临时提升低优先级 owner 的 effective priority；owner unlock 后再清理或重算 donation，并通过 ready queue 重排让调度器观察到新的有效优先级。
 
+实时任务热路径还必须满足以下约束：
+
+- 启动阶段预分配 stack、队列、消息和统计区，进入周期循环后不调用全局 allocator。
+- 不访问文件系统，不执行同步串口打印，不调用 VM manager 或普通虚拟设备后端。
+- 不获取可能由 virtualization domain 持有的 sleepable lock；确需共享 mutex 时必须纳入 #2162 的 donation 链和锁顺序验证。
+- 不创建 CPU mask 可变的 RT task，不支持跨核迁移；非法 affinity 修改返回明确错误。
+- 周期、deadline 和优先级使用类型化配置，优先级范围在入队前验证，不能把任意 `isize` 直接作为长期外部配置契约。
+
+### 3.7 IRQ、内存和设备所有权
+
+CPU 隔离只有与 IRQ 和设备隔离同时成立时才有实时意义。`pCPU3` 只允许接收 RT local timer、RT-owned device IRQ 和 host/RT doorbell；网卡、块设备、控制台、guest 虚拟设备后端和其他普通外部 IRQ 必须固定在 virtualization mask。IRQ affinity 通过 IRQ framework 的类型化 `IrqAffinity` 设置，不能在设备或 Axvisor 代码中用固定 GIC/PLIC/APIC 数字推导路由。
+
+RT-owned device 必须具有唯一 owner：普通设备 probe 不得同时绑定其 MMIO range 和 IRQ，启动失败时也不能静默退回普通 host driver。第一阶段可以只验证模拟 IRQ 或 local timer；真实 MPU6050、UART 或电机控制设备接入应作为独立阶段，补充设备 reset、enable、teardown 和错误恢复语义。
+
+RT stack、mailbox ring、统计区和控制状态应从启动时预留的固定内存池分配。共享 cache line 需要对齐，发布命令和结果使用 Release/Acquire；纯计数器只有在不承担同步语义时才可使用 Relaxed。静态绑核不能隔离 LLC、DRAM controller、interconnect、固件中断和电源管理，因此板卡测试前只能承诺软件调度与 IRQ 隔离，不能直接宣称严格硬实时。
+
+### 3.8 智能侧与实时侧通信
+
+StarryOS 与实时任务之间使用两条有界单向通道：`Starry -> RT command ring` 和 `RT -> Starry event ring`。每条通道采用单生产者、单消费者模型，具有固定容量、消息边界、序号、长度和状态字段；共享 ring 是数据事实源，doorbell 只表示“可能有新数据”。
+
+```mermaid
+sequenceDiagram
+    participant S as StarryOS
+    participant C as Command Ring
+    participant R as pCPU3 RT Task
+    participant E as Event Ring
+    S->>C: 发布控制目标/序号/时间戳
+    S->>R: doorbell
+    R->>C: 有界批量读取
+    R->>R: 执行 8ms 控制周期
+    R->>E: 发布状态/错误/deadline 统计
+    R->>S: virtual IRQ 或通知
+    S->>E: 读取完成结果
+```
+
+队列满、消息非法、序号跳变和对端未就绪必须产生明确结果或 drop/error 统计，不能无限自旋或静默覆盖。RT 侧不得在通知路径分配或等待普通 sleepable lock。优先复用 AxVM 已有 IVC/SPSC 协议与生命周期；只有其消息边界、映射或通知语义无法满足实时路径时，才新增窄的 RT mailbox capability，避免维护两套重复 ring 状态机。
+
+### 3.9 实施阶段与回滚边界
+
+| 阶段 | 交付内容 | 可观察验收 | 回滚方式 |
+| --- | --- | --- | --- |
+| 1 | 合入并修复 #2161 的 RT FIFO、测试发现和 CI 执行链 | scheduler 单元测试及单核 QEMU case 实际执行 | 关闭 `sched-rt-fifo` |
+| 2 | 增加唯一 `CpuPartition`、4 核配置验证和 vCPU placement 拒绝逻辑 | StarryOS 3 vCPU 固定在 `pCPU0..2` | 关闭 AMP 配置恢复完整 host mask |
+| 3 | 建立 `pCPU3` 受限 RT run queue，排除普通 task、IPI readiness 和 block hctx | RT 心跳只出现在 `pCPU3`，VM/shell 正常 | 保留分区代码但不创建 realtime domain |
+| 4 | 完成 IRQ affinity、RT timer、预分配内存和统计 | 非 RT IRQ 不进入 `pCPU3`，timer/deadline 统计递增 | 禁用 RT IRQ route 和 executor |
+| 5 | 接入 command/event ring 与 doorbell | host/guest 能双向交换有序消息，满队列可观察 | 禁用 mailbox feature |
+| 6 | 合入 #2162 或等价 PI mutex，并接入真实控制任务/设备 | 优先级反转回归通过，8ms 控制闭环运行 | 回退到无共享 mutex 的静态控制路径 |
+
+每个阶段都必须保持默认配置可构建、可运行，不允许先合入闲置公共 API 或返回假成功的占位路径。改变 secondary CPU 启动顺序、CPU ownership、IRQ route 或推荐调试方法时，同步更新 `arch-platform-porting` 技能或其引用文档。
+
+### 3.10 验证矩阵与实时性口径
+
+| 风险或功能声明 | 验证层级 | 必须观察的结果 |
+| --- | --- | --- |
+| CPU mask 配置正确 | 单元测试 | mask 非空、互斥、覆盖在线 CPU；非法 vCPU placement 被拒绝 |
+| RT FIFO 语义 | `axsched` 单元测试 | 高优先级先运行、同优先级 FIFO、仅更高优先级触发 RT 抢占 |
+| 4 核启动分流 | Axvisor QEMU SMP4 | `pCPU0..2` host ready，`pCPU3` RT ready，无 readiness 死等 |
+| Starry vCPU 隔离 | Axvisor + StarryOS SMP3 | vCPU task 从未在 `pCPU3` 执行 |
+| housekeeping 隔离 | QEMU instrumentation/板卡统计 | 普通 task、block hctx、console worker 从未进入 `pCPU3` |
+| IRQ 隔离 | QEMU 模拟 IRQ/板卡 | 非 RT IRQ 计数在 `pCPU3` 始终为零 |
+| 通信正确性 | IVC/mailbox 集成测试 | 顺序、边界、满队列、重启和超时行为确定 |
+| PI mutex | 确定性三任务回归 | 中优先级任务不能长期间接阻塞高优先级 waiter |
+| 8ms 控制闭环 | RK3588 压力测试 | 报告最大 wake-up latency、最大 jitter、WCET 和 deadline miss，而非只报平均值 |
+
+实时性结果必须记录硬件型号、CPU 频率策略、测试时长、样本数、StarryOS 压力负载、IRQ 配置和统计方法。平均值只能说明常见开销，不能替代最大值、分位数和 deadline miss。建议至少分别测试空载、guest CPU 压力、网络压力、存储压力和组合压力，并以 bare RTOS、RTOS guest 和 AMP 三条路径使用同一测量定义进行对照。
+
 | PR | 解决的问题 | 关键机制 | 验证重点 |
 | --- | --- | --- | --- |
-| [#2160](https://github.com/rcore-os/tgoskits/pull/2160) | Axvisor 层隔离不足 | 实时 CPU 预留，隔离智能侧 guest 与实时控制路径 | AMP 对比图、RK3588 真机实时数据 |
+| [#2160](https://github.com/rcore-os/tgoskits/pull/2160) | Axvisor 层缺少 CPU 所有权边界 | CPU owner、secondary 分流、VM placement 与资源排除设计 | 本方案复用其分区原则，但 RT CPU 保留受限 `axtask` 调度域 |
 | [#2161](https://github.com/rcore-os/tgoskits/pull/2161) | 默认 FIFO 不支持 RT 优先级 | `RtFifoScheduler` 按有效优先级和 FIFO 顺序选任务 | 高优先级先运行、同优先级 FIFO、tick 抢占判定 |
 | [#2162](https://github.com/rcore-os/tgoskits/pull/2162) | mutex 未使用优先级，存在优先级反转 | base/donated/effective priority，owner donation，ready queue 重排 | 高优先级 waiter 不被中优先级任务长期间接阻塞 |
 
-三项改动组合后，任务一形成完整链路：#2160 先把实时控制任务从智能侧 guest 和普通 vCPU 中隔离出来；#2161 保证预留 CPU 上高优先级控制任务优先运行；#2162 保证控制任务等待 mutex 时不会被优先级反转长期阻塞。该链路支撑后续任务三中双轮足机器人 8ms 平衡闭环的稳定运行。
+三项改动并非无需适配即可直接叠加：#2160 当前独立 RT executor 方向与 #2161/#2162 的 `axtask` 依赖存在架构差异。本方案选择以 #2161 为第一阶段调度基础，复用 #2160 的 CPU 所有权和隔离原则，将 realtime CPU 改造成受限单核 `axtask` domain，再接入 #2162 的有效优先级和 donation。这样才能形成“CPU 分区、RT 调度、锁等待、IRQ 隔离和有界通信”一致的完整链路，并支撑任务三中双轮足机器人 8ms 平衡闭环。
 
 ## 4. 任务二：客户机通信与协议设计
 
