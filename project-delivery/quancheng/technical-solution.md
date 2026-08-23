@@ -567,6 +567,35 @@ control_voice.wav
 
 在机器人实物演示中，智能侧部署在 Orange Pi 5 Plus 上，使用 RK3588 NPU 运行语音模型；控制侧实时路径位于 Axvisor/RT 任务中，直接访问 I2C5、UART3、UART6 和 UART7 等板级外设。启动串口截图 [minicom_output.jpg](assets/minicom_output.jpg) 用于证明系统已经进入板级运行环境，演示视频 [video.mp4](assets/video.mp4) 用于证明语音命令能够驱动机器人动作。
 
+本项目在开发板阶段选型 **SenseVoice 语音识别**作为任务三的智能侧模型，落地链路为：
+
+```text
+Axvisor (EL2, SD 卡加载 guest)
+  -> starry guest (passthrough, vCPU 绑定 A76 大核)
+     -> /dev/dri/card1 (rknpu DRM 重实现)
+        -> librknnrt (C API) -> RK3588 NPU (fp16-scaled 模型)
+           -> CPU 侧 CTC 解码
+```
+
+正确性方法是把推理路径与社区上游运行时（happyme531/SenseVoiceSmall-RKNN2 及模型作者的 rkvoice-stream）逐项对齐：tensor 查询枚举、输入构造（4 个提示帧 + LFR 语音帧）、kaldi 兼容 fbank 前端、CMVN 符号、输出布局与 CTC 解码；前端在宿主机用 kaldi-native-fbank 数值对拍（fbank 偏差 ≤ 3e-4，LFR+CMVN 后 ≤ 4e-5）。板上 zh/en 参考 wav 转写通过（fp16 精度边缘，漏 1-2 字），推理语义与原生 Linux 一致。
+
+### 5.4.1 推理与加载性能优化
+
+智能侧推理最初与原生 Linux 差距明显（单条推理 2.96s vs 1.04s，模型加载 41.2s vs 0.65s）。通过在 card1 ioctl 层增加聚合计时仪表，逐项定位并收敛：
+
+| 优化项 | 问题 | 实测效果（板级，标注日志档与调频状态） |
+| --- | --- | --- |
+| guest vCPU 绑定大核（PR #2166） | guest 运行在 A55 小核（实发约 1175 MHz） | Info 档：模型加载 41.2s→27.1s，推理 2.96s→2.60s |
+| 板级日志降噪（PR #2166） | 每 ioctl 的 info 行 + submit 结构体 dump 约 100KB/轮串口流量 | Error 档：推理 2.60s→1.72s，rknn_init 1.22s→0.66s，加载 26.30s（冷读 25.41s，19.2 MB/s） |
+| 调频 governor 拓扑归因修复（PR #2165） | SMP=1 guest 的 busy 恒记到 A55 簇，实际运行的大核被降到 408 MHz | Error 档＋动态调频：推理 1.72s→1.46s，rknn_init 0.66s→0.50s；冷读 29.82s（16.4 MB/s，突发 I/O 间隙降档所致） |
+| readahead 窗口 1 MiB（PR #2166） | 32 页窗口下 490 MB 模型读发起约 3800 个请求，间隙损失 22% 总线带宽 | 请求与 IDMAC 链上限对齐（板测进行中） |
+
+收敛后 NPU 提交路径达原生水平（7.78 ms/次 vs 原生约 7.5 ms）；剩余模型加载差距由 SD HighSpeed 总线上限决定（冷读实测 16.4～19.2 MB/s，为 24.75 MB/s 总线极限的 66%～78%），后续方向为 UHS-I（SDR104/DDR50）使能，前置的 1.8 V 电压轨与协议状态机工作已在内部分支完成。
+
+优化前后与原生 Linux 的对比图如下，三配置串口原始数据见 `test-plan.md` §5.3：
+
+![SenseVoice 推理与模型加载性能对比](assets/sensevoice-perf.svg)
+
 ### 5.5 推理输出到控制执行的链路
 
 推理输出先转换为控制侧可理解的动作。例如视觉检测结果可转换为 `STOP`、`MOVE`、`WARN`、`ADJUST` 等控制动作，并附带置信度、目标类别和输入帧编号。智能侧将这些字段封装为任务二定义的协议消息，发送给控制侧。控制侧解析后执行动作，并返回执行状态。

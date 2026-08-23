@@ -10,14 +10,16 @@
 
 ## 2. 任务一：实时性与隔离底座 PR
 
-任务一相关 PR 主要体现虚拟化混合系统的实时性与隔离底座能力。三项 PR 按依赖顺序组织：先为 Axvisor 保留控制侧实时 CPU，再在 ArceOS/axtask 中提供单核实时 FIFO 调度能力，最后在该调度能力之上补齐 mutex 优先级继承，避免高优先级控制任务被锁等待间接阻塞。
+任务一相关 PR 主要体现虚拟化混合系统的实时性与隔离底座能力。前三项 PR 按依赖顺序组织：先为 Axvisor 保留控制侧实时 CPU，再在 ArceOS/axtask 中提供单核实时 FIFO 调度能力，最后在该调度能力之上补齐 mutex 优先级继承，避免高优先级控制任务被锁等待间接阻塞。后三项补齐底座的板级块设备与调频能力：IRQ 驱动的 virtio-blk 块设备控制器、OrangePi 5 Plus 的 DW SD 主机 feature 启用，以及 RK3588 调频 governor 的拓扑归因修复。
 
 | PR 编号/链接 | PR 标题 | 主要修改内容 | 涉及目录 | 测试或验证方式 | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | [#2160](https://github.com/rcore-os/tgoskits/pull/2160) | `feat(axvisor): reserve realtime CPU` | 为 Axvisor 增加实时 CPU 预留与运行时识别能力，使虚拟化底座能够把控制侧关键 vCPU 与普通负载隔离开 | `os/axvisor/`、`os/arceos/modules/axruntime/`、`virtualization/axvm/`、`docs/design/axvisor-realtime-cpu.md` | Axvisor/ArceOS 构建路径、VM host 配置和实时 CPU 运行时记录验证 | 已提交到 `dev` |
 | [#2161](https://github.com/rcore-os/tgoskits/pull/2161) | `feat(ax-sched): add single-core RT FIFO scheduler` | 新增 `RtFifoScheduler`、`sched-rt-fifo` feature、ArceOS 单核 QEMU case 和调度器设计文档，为控制侧实时任务提供高优先级优先、同优先级 FIFO 的调度基础 | `components/axsched/`、`os/arceos/modules/axtask/`、`test-suit/arceos/rust/`、`docs/design/current-fifo-issues-and-improvements.md` | `cargo xtask arceos test qemu --test-group rust --test-case sched-rt-fifo --target x86_64-unknown-none`，调度器单测和 QEMU 成功 regex | 已提交到 `dev` |
 | [#2162](https://github.com/rcore-os/tgoskits/pull/2162) | `feat(axtask): add mutex priority inheritance` | 基于 #2161 的 RT FIFO 调度补齐 mutex 优先级继承，拆分 base/effective/donated priority，支持 owner donation、链式传播、ready queue 重排和 unlock cleanup | `os/arceos/modules/axtask/`、`components/axsched/`、`test-suit/arceos/rust/src/task/rt_fifo.rs`、`docs/design/axtask-priority-inheritance.md` | `cargo xtask clippy --package ax-task`、`cargo xtask clippy --package ax-sched`、`sched-rt-fifo` QEMU PI 场景验证 | 已提交到 `dev`，依赖 #2161 先合入 |
-
+| [#2163](https://github.com/rcore-os/tgoskits/pull/2163) | `feat(ax-driver): add IRQ-driven virtio-blk block controller and Axvisor QEMU starry guest smoke` | 新增 IRQ 驱动的 virtio-blk 块设备控制器（描述符表、一致性 DMA、队列所有权契约），并配套 Axvisor QEMU aarch64 starry guest 配置与 smoke 测试用例，支撑 guest 从 virtio-blk 根盘启动 | `drivers/ax-driver/src/virtio/`、`os/axvisor/configs/`、`test-suit/axvisor/` | ax-driver 全 feature clippy；QEMU smoke 用例启动 guest 并命中成功标志 | 已提交到 `dev` |
+| [#2164](https://github.com/rcore-os/tgoskits/pull/2164) | `fix(axvisor): enable rockchip-dwmmc on OrangePi 5 Plus` | 板级与测试构建配置启用 `ax-driver/rockchip-dwmmc`：SD 卡位于 mmc@fe2c0000 的 DW 主机之后，缺该 feature 时 axvisor 无法从 fs 加载 guest 镜像 | `os/axvisor/configs/board/`、`test-suit/axvisor/normal/board-orangepi-5-plus/` | axvisor 板级构建；板上 SD 枚举与 guest 内核从 ext4 加载 | 已提交到 `dev` |
+| [#2165](https://github.com/rcore-os/tgoskits/pull/2165) | `fix(ax-driver): attribute RK3588 governor busy by FDT cpu topology` | 调频 governor 的 busy 归因改为按 guest FDT `/cpus` 节点的 SCMI clock id 映射逻辑 CPU 到实际簇；无在线 CPU 的簇不再被误降频；降档设 boot OPP 地板；新增只读频率 readout | `drivers/ax-driver/src/soc/rockchip/` | 归因单测（clock id 表、物理兜底分区、单大核 guest 映射）；板上 gov 日志与频率 readout 验证 | 已提交到 `dev` |
 ## 3. 任务二：客户机通信底座 PR
 
 任务二相关提交和 PR 主要体现客户机之间的通信能力，包括虚拟网络配置、IP 链路、应用层协议、请求响应、心跳、超时、重试和异常处理。前三项为通信链路的底层前置提交，后五项为直接实现通信能力的 PR。
@@ -39,7 +41,7 @@
 
 | PR 编号/链接 | PR 标题 | 主要修改内容 | 涉及目录 | 测试或验证方式 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| 待补 | 待补 | 待补 | `drivers/npu/`、AI 示例、板级测试或应用演示目录 | 待补 | 待补 |
+| [#2166](https://github.com/rcore-os/tgoskits/pull/2166) | `perf(rk3588): close the guest performance gap on OrangePi 5 Plus` | AI 推理负载性能收敛四件套：guest vCPU 绑定大核 A76（0x00→0x400）、板级日志降噪至 Warn、card1 ioctl 聚合计时仪表、缓存文件 readahead 窗口扩至 1 MiB（与 dwmmc IDMAC 链上限对齐） | `os/axvisor/configs/vms/`、`os/StarryOS/kernel/src/pseudofs/dev/`、`fs/ax-fs-ng/src/file/cache/` | ax-driver/ax-fs-ng clippy、板级构建；板上实测（Error 档）：本 PR 单独推理 2.96s→1.72s、加载 41.2s→26.3s（静态 1200 MHz）；叠加 #2165 动态调频后推理 1.46s、加载 30.62s；NPU submit 7.78ms/次达原生水平（原生约 7.5ms） | 已提交到 `dev` |
 
 ## 5. 测试验收与文档 PR
 

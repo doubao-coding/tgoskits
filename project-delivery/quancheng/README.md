@@ -35,4 +35,5 @@ TGOSKits 仓库提供 ArceOS、StarryOS、Axvisor 及相关组件的统一开发
 - `test-suit/axvisor/`：Axvisor QEMU、U-Boot 与板级测试入口。
 - `test-suit/starryos/`：StarryOS 普通测试和压力测试入口，可支撑客户机能力、网络和负载场景验证。
 - `drivers/npu/`、`test-suit/starryos/normal/board-orangepi-5-plus/npu-yolov8/`：AI 推理与板级 NPU 验证相关目录，是任务三应用展示的重要参考。
+- `apps/starry/sensevoice-rknn/`（板级应用分支）：SenseVoice 语音识别在 axvisor+starry guest + RK3588 NPU 上的部署与调优材料；相关通用修复与性能 PR 见 [#2163](https://github.com/rcore-os/tgoskits/pull/2163)、[#2164](https://github.com/rcore-os/tgoskits/pull/2164)、[#2165](https://github.com/rcore-os/tgoskits/pull/2165)、[#2166](https://github.com/rcore-os/tgoskits/pull/2166)。
 - `rt-robot` 分支中的 `os/axvisor/src/wheel/`、`sensevoice_rknn_npu.py` 和 `orangepi-5-plus-rt-sd-wheel`：双轮足机器人实物演示原型，包含 SenseVoice 语音命令、RT mailbox 转发、8ms 轮足平衡闭环和板级外设控制。
