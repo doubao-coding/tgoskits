@@ -151,6 +151,23 @@ Axvisor 作为二者之下的虚拟化底座，负责把两类客户机放在同
 
 八项变更的共同边界是任务二通信底座：它们不实现具体 AI 模型、不规定某种摄像头或 NPU 驱动，也不把控制动作绑定到某个板卡外设；任务三只需把推理结果编码到已有 payload，并使用本章定义的请求/响应流程。
 
+#### 4.1.1 成功标准
+
+任务二以可观察的端到端结果而不是单一模块编译成功作为完成标准：两个 guest 必须分别获得固定 MAC 和 IPv4 地址；StarryOS 必须能向 ArceOS TCP 4242 发送完整 GIPC CONTROL；ArceOS 必须完成 framing、CRC 和 sequence 校验并返回同序列 STATUS；断连后客户端必须按有限预算重新建连；运行结束必须给出请求数、成功数、应用错误、传输失败、重连、恢复、延迟和有效载荷吞吐。任一层失败都必须通过 `GIPC_*_ERROR`、`GIPC_STARRY_TIMEOUT` 或进程非零状态显式传播。
+
+#### 4.1.2 设计选择与替代方案
+
+| 方案 | 是否作为主通道 | 选择理由或排除原因 |
+| --- | --- | --- |
+| VirtIO-net + Axvisor 内部 L2 switch + TCP | 是 | 两端均经过标准 IP 协议栈；拓扑封闭、地址固定、无宿主网络依赖；TCP 适合控制指令和状态响应 |
+| UDP/IP | 否，协议保留扩展能力 | 可降低连接开销，但必须在应用层实现 ACK、超时重传、乱序和重复包处理；当前需求优先采用 TCP 简化主路径 |
+| TAP/bridge/NAT | 非默认变体 | 便于接入宿主或外部设备，但引入主机网络配置、路由、防火墙和环境差异，不适合作为默认可复现路径 |
+| 物理网口 | 板级扩展 | 接近真实部署，但会引入网卡驱动、线缆、交换机和现场网络策略，不作为 QEMU 基线 |
+| vsock | 仅辅助候选 | 不计入主要 IP 网络通道，不能替代网卡、路由和 TCP/IP 验收 |
+| 共享内存/HyperCall/裸 MMIO | 禁止作为业务通道 | 不经过 IP 协议栈，无法满足赛题对网络拓扑、路由、端口和传输可靠性的要求 |
+
+协议 crate 刻意保持 `no_std` 和传输无关：它只拥有线格式、CRC、序列窗口和纯状态机，不访问 socket、guest memory、MMIO 或 hypervisor 服务。StarryOS C 程序与 ArceOS Rust 程序分别承担 OS glue，使线协议可以被独立测试，也避免把 Linux/POSIX API 依赖引入可复用协议层。
+
 ![StarryOS 与 ArceOS 客户机 IP 通信架构](assets/network-communication.svg)
 
 ### 4.2 部署拓扑、地址规划与设备所有权
@@ -163,9 +180,30 @@ Axvisor 作为二者之下的虚拟化底座，负责把两类客户机放在同
 | 控制侧 | ArceOS/RTOS | `virtnet0` / `eth0` | `52:54:00:42:00:02` | `10.0.42.2/24` | 监听 TCP 4242，校验请求，返回 STATUS/ERROR |
 | 交换侧 | Axvisor | 内部 L2 switch | 不向 guest 暴露独立 IP | 二层转发 | 维护端口注册、帧转发和 guest 唤醒 |
 
-StarryOS 启动时由 `/usr/bin/gipc-network-init.sh` 完成 `eth0` 配置：检查 `ip` 工具和接口存在，执行 `ip link set eth0 up`，配置 `10.0.42.1/24`，确认 `10.0.42.0/24` 直连路由后才启动 GIPC 客户端。ArceOS 服务端在发现 `eth0` 后调用 `ax_net::set_interface_ipv4(..., 10.0.42.2, 24)`，再绑定 `0.0.0.0:4242`。两个客户机不依赖默认网关，业务只在私有 /24 子网内通信。
+StarryOS 启动时由 `/usr/bin/gipc-network-init.sh` 完成 `eth0` 配置：检查 `ip` 工具和接口存在，执行 `ip link set eth0 up`，配置 `10.0.42.1/24`，并尝试确保 `10.0.42.0/24` 直连路由存在。脚本在地址复核成功后打印 `GIPC_STARRY_NET_READY`，再由 autostart 启动客户端。当前脚本会容忍显式 `ip route add` 失败，因为内核通常在添加 /24 地址时自动生成直连路由；因此完整验收仍需保存 `ip route show dev eth0` 结果，不能只用 READY 标志替代路由证据。ArceOS 服务端发现 `eth0` 后调用 `ax_net::set_interface_ipv4(..., 10.0.42.2, 24)`，再绑定 `0.0.0.0:4242`。在当前仅有一个私网接口的 VM 中，实际可达面仍限定于该隔离子网，但代码本身不是“仅绑定 10.0.42.2”的 L3 白名单。
 
 设备所有权保持在 Axvisor：VM 配置决定设备模型、MMIO 区域、IRQ 和 guest MAC；VirtIO-net 驱动负责队列和 DMA；交换机负责二层转发；guest 应用只拥有自己的 socket、协议会话和业务状态。块设备可以承载 rootfs 或镜像，但不承载 GIPC 业务数据。
+
+#### 4.2.1 VM 资源与启动配置
+
+| 配置项 | StarryOS VM | ArceOS VM |
+| --- | --- | --- |
+| VM ID | 1 | 2 |
+| VM 名称 | `starry-virtio-net-peer` | `arceos-guest-ip-server` |
+| vCPU | 1 个，绑定物理 CPU 1 | 1 个，绑定物理 CPU 2 |
+| guest 内存 | `0x8000_0000` 起，大小 `0x4000_0000`（1 GiB） | `0x8000_0000` 起，大小 `0x2000_0000`（512 MiB） |
+| 内核入口/加载地址 | `0x8020_0000` | `0x8020_0000` |
+| DTB 加载地址 | `0x8000_0000` | `0x8000_0000` |
+| 虚拟设备 | `virtnet0`, model=`virtio-net` | `virtnet0`, model=`virtio-net` |
+| passthrough | 空 | 空 |
+
+Axvisor host 使用 AArch64 `cortex-a72`、GICv3、4 vCPU 和 4 GiB QEMU 内存；board 配置同时列出两个 VM TOML。两个 guest vCPU 绑定不同物理 CPU，既避免配置冲突，也使通信延迟不会由同一 pCPU 上的串行调度人为造成。
+
+#### 4.2.2 二层交换决策
+
+内部 `VirtualSwitch` 维护 `SwitchPortId → port` 和 `MAC → SwitchPortId` 两个索引。端口注册会拒绝重复 ID 和重复 MAC；guest 发出的 Ethernet 源 MAC 必须与端口注册 MAC 一致，否则以 `SourceMacViolation` 丢弃并计数。已知单播只转发到目标端口；广播/组播复制给除源端口以外的活动端口，以支持 ARP；小于 14 字节的帧、已注销 generation 和未知上行单播分别计入独立 drop counter。
+
+端口标识包含 VM ID、generation 和 device index，VM 重启后旧 generation 的端口不会冒充新实例；注册句柄和 active gate 负责让残留 `Arc` 安全失效。当前 Axvisor glue 虽能得到 switch 的 uplink 意图，但默认 GIPC 配置没有 host uplink worker、`-netdev`、TAP 或 bridge，因此主测试路径是完全位于 Axvisor 进程内的二层广播域。
 
 ### 4.3 网络启动时序与数据路径
 
@@ -173,21 +211,62 @@ StarryOS 启动时由 `/usr/bin/gipc-network-init.sh` 完成 `eth0` 配置：检
 
 1. Axvisor 读取 board/QEMU/VM 配置，创建两个 VM、vCPU、地址空间、VirtIO-net MMIO 节点和内部交换机端口。
 2. StarryOS guest 启动，完成 VirtIO-net 设备发现和 `eth0` 创建。
-3. ArceOS guest 启动，配置 `eth0 = 10.0.42.2/24`，打印 `GIPC_RTOS_READY` 和 `GIPC_RTOS_LISTEN ip=10.0.42.2 port=4242`。
-4. StarryOS 执行网络初始化脚本，打印 `GIPC_STARRY_NET_READY interface=eth0 address=10.0.42.1/24 peer=10.0.42.2`。
+3. ArceOS guest 启动；应用进入 `main` 时先打印 `GIPC_RTOS_READY`，随后发现并配置 `eth0 = 10.0.42.2/24`，绑定成功后再打印 `GIPC_RTOS_LISTEN ip=10.0.42.2 port=4242`。前一个标志只表示应用入口已执行，后一个标志才证明网络和 listener 已就绪。
+4. StarryOS profile 执行 autostart 和网络初始化脚本，打印 `GIPC_STARRY_NET_READY interface=eth0 address=10.0.42.1/24 peer=10.0.42.2`。两个 guest 并发启动，RTOS LISTEN 与 Starry NET READY 的相对先后不应作为协议正确性的前提。
 5. StarryOS 客户端建立 TCP 连接，发送 CONTROL 或 HEARTBEAT；只有收到合法 STATUS/ERROR 后才记录一次应用层响应。
 6. QEMU/测试运行器收集双方串口和客户端日志，`verify_metrics.py` 验证成功标志和正延迟/吞吐，`aggregate_metrics.py` 计算整体统计。
 
 数据路径为：StarryOS socket → StarryOS TCP/IP → `eth0` VirtIO TX queue → Axvisor VirtIO-net backend → 内部 L2 switch → ArceOS VirtIO RX queue → ArceOS TCP/IP → TCP listener。响应沿相反方向返回。任何共享内存、HyperCall 或裸 MMIO 访问只属于设备实现或控制面，不属于业务 payload 路径。
 
+#### 4.3.1 Host 构建与 rootfs 准备
+
+`run-qemu-aarch64-starry-rtos-gipc.sh` 以 `ROOTFS_IMAGE` 为必需输入，并完成以下准备：
+
+1. 从 `LLVM_OBJCOPY` 或 Rust sysroot 定位 `llvm-objcopy`；缺失时立即退出。
+2. 使用 `cargo xtask arceos build -p arceos-guest-ip-server -c apps/arceos/build-aarch64-guest-ip-server.toml` 构建控制侧 ELF。
+3. strip ELF 并转为可由 VM 配置装载的 raw binary。
+4. 若未提供 `GIPC_STARRY_CLIENT_BIN`，使用宿主 C 编译器构建 `linux-client.c`。
+5. 默认 `GIPC_INJECT_CLIENT=1`，通过 `debugfs` 向 rootfs 注入 `/usr/bin/gipc-starry-client`、`/usr/bin/gipc-network-init.sh` 和 `/etc/profile.d/99-gipc.sh`。设置 `GIPC_INJECT_CLIENT=0` 可使用预置镜像，避免重复修改 rootfs。
+6. 调用 `cargo xtask axvisor qemu`，同时传入 board、QEMU 和 rootfs 配置。QEMU 总体运行门限为 180 秒。
+
+#### 4.3.2 首包的 ARP、TCP 和 GIPC 路径
+
+第一个 CONTROL 并不是直接从应用跳到对端 socket，而是依次经过以下协议和设备动作：
+
+1. StarryOS 根据 `/24` 前缀判定 `10.0.42.2` 为直连邻居；邻居缓存为空时发送广播 ARP request。
+2. Axvisor switch 将广播复制到除源以外的活动端口；ArceOS 回复单播 ARP response，switch 按固定目标 MAC 精确投递。
+3. StarryOS 发起 TCP SYN，完成 SYN/SYN-ACK/ACK；客户端随后产生 40 字节 CONTROL（32 字节头 + 8 字节 payload）。
+4. TCP/IP 栈把字节流封装为 IPv4/Ethernet 帧并提交 VirtIO TX descriptor chain。设备后端通过作用域 DMA 访问 descriptor，移除 `virtio_net_hdr` 后将 Ethernet frame 交给 switch。
+5. switch 校验源 MAC、查找目标端口并将帧放入有界 ingress；目标端口通知 ArceOS vCPU。设备先把帧和 used ring 写回 guest，再触发 edge IRQ，保证 guest 观察中断时数据已可见。
+6. ArceOS TCP 栈重组字节流；服务端先 `read_exact(32)`，校验固定头并获得 `payload_len`，再精确读取 payload 和验证 CRC。
+7. 服务端生成同序列 STATUS，沿反向 VirtIO-net/IPv4/TCP 路径返回。客户端完成整帧校验后才计算成功 RTT。
+
+最大 GIPC frame 为 `32 + 1200 = 1232` 字节；加上典型 20 字节 IPv4 头和 20 字节 TCP 头后为 1272 字节，低于常用 1500 字节 Ethernet MTU，因此最大应用帧在无额外 TCP option 的典型路径中不需要 IPv4 分片。当前 VirtIO-net profile 不依赖多队列、GSO、TSO 或 checksum offload。
+
+#### 4.3.3 日志状态的精确定义
+
+| 标志 | 精确含义 | 能否单独证明业务成功 |
+| --- | --- | --- |
+| `GIPC_RTOS_READY` | ArceOS 应用进入 `main` | 否，可能尚未配置 IP 或 bind |
+| `GIPC_RTOS_LISTEN` | `eth0` 配置完成且 TCP bind 成功 | 否，只证明服务端 ready |
+| `GIPC_RTOS_CONNECTED` | accept 到一个 TCP peer | 否，尚未证明 GIPC 帧合法 |
+| `GIPC_RTOS_RECOVERABLE_ERROR` | 当前连接发生 EOF、解析或 I/O 错误，服务返回 accept | 否；故障注入中允许，正常基线应调查 |
+| `GIPC_STARRY_NET_READY` | StarryOS 已发现接口并确认静态地址 | 否，未证明对端可达 |
+| `GIPC_STARRY_STATUS` | 客户端收到同序列、magic/version/CRC 合法的 STATUS | 是，证明一次请求响应闭环 |
+| `GIPC_STARRY_ERROR` | 收到 ERROR 或响应协议校验失败 | 否，作为失败证据 |
+| `GIPC_STARRY_TIMEOUT` | 一个请求耗尽三次 attempt | 否，作为不可恢复失败证据 |
+| `GIPC_STARRY_METRIC` | 一次 client process 的汇总 | 需结合字段判定 |
+
 ### 4.4 GIPC 应用层帧与消息语义
 
 GIPC 使用固定 32 字节大端序头部加不超过 1200 字节 payload 的 framing，解决 TCP 字节流的粘包、拆包和边界恢复问题。头部布局如下：
 
+![GIPC v1 帧格式与校验边界](assets/gipc-frame-format.svg)
+
 | 偏移 | 长度 | 字段 | 语义与校验 |
 | ---: | ---: | --- | --- |
 | 0 | 4 | `magic` | 固定 `0x47495043`（`GIPC`），拒绝错误协议流 |
-| 4 | 1 | `version` | 当前版本 `1`，未知版本返回/记录 `UnsupportedVersion` |
+| 4 | 1 | `version` | 当前版本 `1`；未知版本由解码器 fail-closed 拒绝，错误码体系预留 `UnsupportedVersion` |
 | 5 | 1 | `message_type` | `Hello=1`、`Control=2`、`Status=3`、`Error=4`、`Heartbeat=5`、`Ack=6` |
 | 6 | 2 | `flags` | `ACK_REQUIRED` 等控制标志，按大端序编码 |
 | 8 | 2 | `header_len` | 必须为 32，避免错误版本改变字段解释 |
@@ -200,52 +279,189 @@ GIPC 使用固定 32 字节大端序头部加不超过 1200 字节 payload 的 f
 
 消息处理规则如下：
 
-- `CONTROL`：智能侧发起控制请求，payload 当前为固定控制结构；控制侧先完成头、长度、CRC 和序列检查，再进入控制状态机。
-- `STATUS`：控制侧返回执行状态和原请求序列号；TCP profile 用合法的响应帧作为应用交付确认，不额外伪造 UDP 式 ACK。
-- `ERROR`：携带错误码和序列号，表示版本、长度、校验、序列、payload 或消息类型错误；客户端将其计入应用层错误并让验证器失败。
-- `HEARTBEAT`：用于检测会话活性，按与 CONTROL 相同的 framing 和响应关联规则处理。
-- `ACK`：协议保留类型，用于未来不可靠传输或显式确认扩展；当前主路径为 TCP，不把 ACK 当作 TCP 字节流可靠性的替代品。
+- `HELLO`：服务端返回同序列、同 payload 的 STATUS，可用于会话建立或能力扩展；当前客户端主流程不主动发送。
+- `CONTROL`：智能侧发起控制请求，当前 payload 精确为 8 字节 `00 00 00 01 00 00 00 00`。代码只规定长度必须为 8，尚未公开定义逐字段业务 schema；服务端把 payload 原样放入 STATUS，用于验证控制请求/状态响应链路，不应写成已经接入真实执行器。
+- `STATUS`：控制侧返回原请求序列号和 payload；当前 `timestamp_ns=0`、`flags=0`、`error_code=None`。TCP profile 用合法 STATUS 作为应用交付确认，不发送独立 ACK。
+- `ERROR`：只对可安全关联 sequence 的语义错误显式返回；当前包括 `InvalidSequence`、`InvalidPayload` 和 `UnsupportedMessage`。结构或 CRC 错误会终止当前连接并记录 recoverable error，而不是构造 ERROR。
+- `HEARTBEAT`：服务端返回同序列、同 payload STATUS；具备线协议语义，但当前 C 客户端主流程只发送 CONTROL。
+- `ACK`：协议保留类型；服务端当前接收后不响应，`IS_ACK` 和 `ReliableSession::acknowledge` 未接入 TCP 主路径。
+
+#### 4.4.1 编码流水线
+
+Rust `encode_frame` 不信任调用者提供的派生字段：它按常量重写 magic、version、header length，根据实际 payload 重写 payload length，并先把 checksum 清零。编码顺序为“规范化 header → 写入 32 字节头 → 复制 payload → 对完整帧计算 CRC32 → 回填 checksum”。CRC 使用反射式 CRC-32/IEEE：初值 `0xffff_ffff`，多项式 `0xedb8_8320`，结果按位取反；头部保留字节也在覆盖范围内。
+
+C 客户端不直接序列化 C struct，避免 ABI padding 和对齐差异；它通过固定偏移和 `htons`/`htonl` 写网络序字段，64 位时间戳拆成两个 32 位网络序值。这使 C/Rust 两端不依赖相同编译器布局。
+
+#### 4.4.2 分层解码流水线
+
+服务端先固定读取 32 字节，再由 `decode_header` 验证 magic、version、message type、header length、payload bound 和 error code。只有固定头可信后才按 `payload_len` 读取载荷；`decode_frame` 再检查截断、尾随字节和 CRC。随后才执行 sequence 分类和消息分派。最大栈缓冲区固定为 `32 + 1200 = 1232` 字节，不根据不可信长度动态分配。
+
+客户端响应校验集与 Rust decoder 不完全对称：它验证 payload 上限、magic、version、同 sequence 和 CRC，并只接受 STATUS 或显式处理 ERROR；当前未单独拒绝未知 flags、非零 reserved、错误的 response `header_len` 或未知 error code。因此技术边界应表述为“客户端当前 profile 校验集”，而不是宣称两端执行完全相同的全字段解析。
+
+#### 4.4.3 本地解析错误与线上错误码
+
+| 类别 | 典型成员 | 当前处理方式 |
+| --- | --- | --- |
+| `FrameError`：本地构造/解析失败 | `OutputTooSmall`、`TruncatedHeader`、`InvalidMagic`、`UnsupportedVersion`、`InvalidHeaderLength`、`PayloadTooLarge`、`UnknownMessageType`、`UnknownErrorCode`、`ChecksumMismatch` | 服务端结束当前连接，外层记录 `GIPC_RTOS_RECOVERABLE_ERROR` 并继续 accept |
+| `ErrorCode`：可信帧内可传递错误 | `InvalidSequence=4`、`InvalidPayload=5`、`UnsupportedMessage=6` | 返回同 sequence、空 payload、带 CRC 的 ERROR；客户端记录 code/seq 并计入应用错误 |
+| 预留错误码 | `UnsupportedVersion=1`、`InvalidLength=2`、`ChecksumMismatch=3`、`Busy=7` | 线格式编号稳定，但当前结构/完整性解析路径不会发送这些 ERROR |
+
+当 header 或 sequence 尚未可信时，服务端不尝试回复可能错误关联的 ERROR，而采用 fail-closed 断连。这一区分防止文档把“错误码枚举存在”误写成“所有解码错误都已在线返回”。
 
 ### 4.5 TCP 可靠性、状态机与异常恢复
 
 TCP 只保证有序字节流，不保证应用请求已经被处理，因此实现仍需维护应用层状态：
 
+![GIPC 请求响应与异常恢复时序](assets/gipc-request-sequence.svg)
+
 | 状态/事件 | StarryOS 客户端行为 | ArceOS 服务端行为 |
 | --- | --- | --- |
 | 建连 | 最多尝试 3 次，socket 读写超时为 1 秒 | `accept` 新连接并建立会话 |
 | 发送 | 为每个进程内请求分配递增 `sequence`，完整写入 32-byte header + payload | `read_header` 后按 `payload_len` 精确读取完整帧 |
-| 正常响应 | 校验 magic/version/type/sequence/CRC，记录 STATUS 和 RTT | 返回同序列 STATUS，保留控制状态 |
+| 正常响应 | 校验 magic/version/type/sequence/CRC，记录 STATUS 和 RTT | 返回同序列、同 payload STATUS |
 | ERROR | 读取 `error_code`，计入 `errors`，拒绝伪造成功 | 对非法 payload、序列或消息类型返回 ERROR |
 | 读写超时/断连 | 关闭当前 socket，增加 timeout，重新 connect 并重发未完成请求 | 记录 recoverable error，关闭当前会话并继续 accept |
-| 重复 sequence | 客户端只接受当前请求的匹配响应 | `ReliableSession` 分类 `Duplicate`，控制请求返回最近状态而不重复执行 |
+| 重复 sequence | 客户端只接受当前请求的匹配响应 | 同一连接内分类 `Duplicate`；CONTROL 返回同序列、同 payload STATUS，不进入 `New` 分派 |
 | 旧/乱序 sequence | 计入协议错误 | 分类 `OutOfOrder`，返回 `InvalidSequence` |
 | 重试预算耗尽 | 输出 `GIPC_STARRY_TIMEOUT` 并返回非零 | 由上层日志记录会话失败，不静默降级到非 IP 通道 |
 
-每个请求的最大尝试次数为 3；重连不是成功本身，只有收到匹配的 STATUS 才计入 `success`。同一进程的序列号从 1 递增，多请求运行可验证响应关联。由于当前 ArceOS 服务端按 TCP 连接创建 `ReliableSession`，跨连接的长期幂等去重仍应由控制动作设计保证；对于非幂等动作，应用层应使用序列号和最近执行状态防止重复执行。
+每个请求的最大总尝试次数为 3（首次 + 最多 2 次后续尝试）；重连不是成功本身，只有收到匹配的 STATUS 才计入 `success`。同一进程的序列号从 1 递增，但客户端当前每个请求成功或失败后都会关闭 socket，下一个请求建立新连接。由于 ArceOS 服务端也按 TCP 连接创建 `ReliableSession`，sequence 窗口只在单连接内有效，不能宣称跨连接 exactly-once。非幂等控制动作必须在未来业务层增加持久 request ID、执行结果缓存或动作幂等约束。
+
+#### 4.5.1 客户端状态机
+
+客户端参数 `<peer-ip> [request-count]` 中请求数范围为 1..1000。每个请求执行 `PREPARE → CONNECT → SEND → READ_HEADER → READ_PAYLOAD → VALIDATE`：
+
+- `write_full` 循环处理短写；`read_full` 循环处理短读，EOF 映射为 `ECONNRESET`。
+- 每次 attempt 新建 socket，并设置 `SO_SNDTIMEO`/`SO_RCVTIMEO` 为 1 秒。
+- connect、send、header read、payload read 或 payload 超限进入 `CLOSE → RETRY`；三次耗尽为 `TIMED_OUT`。
+- magic、version、sequence 或 CRC 错误、ERROR 帧和非 STATUS 类型属于协议/应用错误，立即结束该请求，不重试。这与 README 中“protocol failure 也重试”的宽泛描述不同，技术方案以实际代码为准。
+- 成功尝试从编码前的 `CLOCK_MONOTONIC` 时间开始计时，到完整 STATUS 校验结束；先前失败 attempt 的等待时间不计入成功 RTT。
+
+#### 4.5.2 服务端状态机
+
+ArceOS 使用单线程 `accept` 循环。每个连接新建 session，循环读取完整帧、执行 sequence 分类和消息分派。EOF、解码或写入失败使 `serve_connection` 返回，外层打印 recoverable error 后继续 accept，因此单个连接异常不会终止整个服务。
+
+`RetryPolicy(1000 ms, 3)` 虽被放入 server session，但 TCP 服务端当前只调用 `observe`，不调用 `begin`、`acknowledge` 或 `poll_retry`；它不构成服务端 I/O deadline。`ReliableSession` 库中的 `max_retries` 表示首次发送后的重传次数，而 C 客户端的 3 是总 attempt 数，两者是独立状态机，不能混为一谈。
+
+#### 4.5.3 序列窗口与回绕
+
+| 输入 sequence | 分类 | 状态变化 |
+| --- | --- | --- |
+| 连接内首个值 | `New` | 记录为 `last_received`，不要求必须从 1 开始 |
+| 等于 `last_received` | `Duplicate` | 不推进窗口 |
+| `sequence.wrapping_sub(last) < 2^31` 且不相等 | `New` | 推进窗口，允许 u32 自然回绕和半序空间内向前跳号 |
+| 其他值 | `OutOfOrder` | 不推进窗口，返回 `InvalidSequence` |
+
+该算法不是严格的 `last + 1` 连续窗口；它允许向前跳号，适合请求关联和陈旧包识别，但不检测“缺失的中间序列”。
+
+#### 4.5.4 故障与恢复矩阵
+
+| 故障 | 检测点 | 恢复动作 | 验收证据 |
+| --- | --- | --- | --- |
+| 首次连接被对端关闭 | client header read EOF | 关闭 socket，下一 attempt 新建连接并重发同 sequence | 确定性测试断言 `attempts=2 timeouts=1 reconnects=1 recovery=1` |
+| TCP 短读/短写 | `read_full`/`write_full` | 循环补齐，未完成前不解析帧 | 最终 STATUS 或 I/O 失败 |
+| 服务端连接 EOF/坏帧 | `read_exact`/decoder | 结束当前连接，外层继续 accept | `GIPC_RTOS_RECOVERABLE_ERROR`，随后可再次 CONNECTED |
+| CONTROL 长度不是 8 | server dispatch | ERROR `InvalidPayload`，保持连接 | 客户端 `GIPC_STARRY_ERROR code=5` |
+| 旧 sequence | server observe | ERROR `InvalidSequence`，保持连接 | error code 4 |
+| response CRC/type/sequence 错误 | client validate | `errors++`，该请求失败且不重试 | `GIPC_STARRY_ERROR code=protocol` |
+| 三次传输 attempt 均失败 | client retry budget | 输出 TIMEOUT，总进程最终非零 | `GIPC_STARRY_TIMEOUT seq=... attempts=3` |
+
+服务端 accepted stream 当前没有独立 receive/send/idle deadline，且逐连接串行服务；对端连接后长期不发送完整头可能占用服务循环。这是当前 profile 的可用性边界，不应写成已实现“服务端半连接超时回收”。
 
 ### 4.6 安全边界、故障模型与访问控制
 
-默认拓扑通过“不连接宿主网络”缩小攻击面：没有默认网关、NAT 或宿主 bridge，业务服务只绑定客户机私有网段上的 TCP 4242。配置文档固定对端 MAC/IP，运行日志打印实际接口、地址、peer 和端口；后续板级或桥接变体必须单独记录二层边界、路由、NAT 和防火墙规则，不能悄悄替换默认测试拓扑。
+默认拓扑通过“不连接宿主网络”缩小攻击面：没有默认网关、NAT、宿主 bridge 或 uplink worker。ArceOS 实际 bind `0.0.0.0:4242`，在当前只有私网接口的 VM 中实际暴露面仍是封闭二层域，但代码没有 guest firewall、peer IP allowlist 或只绑定 `10.0.42.2` 的 L3 控制。配置固定对端 MAC/IP，运行日志打印接口、地址、peer 和端口；后续板级或桥接变体必须单独记录二层边界、路由、NAT 和防火墙规则，不能沿用默认隔离结论。
 
 协议解码在执行控制动作前完成 magic、version、header_len、payload_len、message_type、error_code、sequence 和 CRC 校验；超过最大 payload、未知类型、非法错误码或校验失败均不得进入控制状态机。错误路径必须产生 ERROR 或明确的断连/错误日志，验证脚本以非零返回传播失败。
 
 故障模型覆盖：接口不存在、地址配置失败、服务端尚未监听、TCP 建连失败、半帧/粘包、CRC 损坏、版本不兼容、非法 payload、重复请求、乱序请求、读写超时和服务端重启。共享内存、HyperCall、裸 MMIO 和 vsock 不得作为这些故障的隐式 fallback。
 
+#### 4.6.1 信任边界与已实现控制
+
+| 边界 | 已实现机制 | 安全/健壮性作用 |
+| --- | --- | --- |
+| guest 应用 | 只使用 POSIX/ax_std TCP socket；协议 crate 不访问 socket、MMIO 或 guest memory | 防止应用绕过 IP 主通道 |
+| VM 设备 | 两个 VM `passthrough=[]`，各自只获得独立 `virtnet0`、MMIO/IRQ 和作用域 DMA grant | 限制设备和内存访问范围 |
+| switch 注册 | port ID 与 MAC 均要求唯一，RAII 注销，generation active gate | 阻止重复配置和旧 VM 端口残留 |
+| Ethernet ingress | 源 MAC 必须等于端口注册 MAC；小帧、inactive generation 丢弃 | 二层 anti-spoof 和畸形帧隔离 |
+| 转发 | 已知单播只给目标；未知单播不向本地端口泛洪；广播/组播只给其他 active port | 减少横向暴露，同时保留 ARP |
+| 协议输入 | 固定 1232 B 缓冲上限、结构校验、CRC、sequence 分类、CONTROL 长度 8 | 不按不可信长度无界分配，错误不进入控制分派 |
+
+switch 的 `source_mac_violation`、`undersize_drop`、`inactive_generation_drop`、`duplicate_mac_rejected` 和 `unknown_unicast_drop` 使用 Relaxed 原子统计；这些计数只用于观测，不参与同步或改变转发决策。anti-spoof 只校验 Ethernet 源 MAC，不验证 IPv4 源地址。
+
+#### 4.6.2 错误处置分级
+
+| 错误级别 | 示例 | 响应策略 |
+| --- | --- | --- |
+| 可关联语义错误 | 旧 sequence、CONTROL 长度错误、把 STATUS/ERROR 作为请求 | 返回同 sequence ERROR，分别使用 `InvalidSequence`、`InvalidPayload`、`UnsupportedMessage` |
+| 结构/完整性错误 | header 不足、magic/version/type/header length/error code 非法、payload 截断、CRC mismatch | 不信任 sequence，关闭当前连接；服务端记录 recoverable error 并继续 accept |
+| 网络启动错误 | Starry 缺少 `ip`、`eth0` 或地址复核失败；ArceOS 缺 `eth0`、地址配置或 bind 失败 | 输出 NET_ERROR/RTOS_ERROR，阻止业务流程继续 |
+| 客户端传输错误 | connect/send/read/EOF/payload 读取失败 | 计入“超时或传输尝试失败”，按 3 次总预算重试；耗尽后 TIMEOUT |
+| 业务响应错误 | ERROR、非 STATUS、响应 magic/version/sequence/CRC 错误 | 计入 application error，当前请求立即失败 |
+
+#### 4.6.3 非安全属性与上线边界
+
+当前方案没有 TLS、消息签名、身份认证、密钥协商、L3/L4 ACL、连接速率限制或服务端 idle timeout。CRC32 只检测偶发损坏，不提供机密性、来源认证或抗恶意篡改。CONTROL 当前只校验 8 字节长度，没有逐字段授权规则。默认威胁模型是“Axvisor 正确隔离、只有两个受控 VM 端口、无外部 uplink”。
+
+如果未来启用 TAP/bridge/NAT/物理网口，必须把下列策略作为新部署的显式前置条件：默认拒绝；仅允许源 `10.0.42.1` 到目的 TCP 4242；限制 bridge/TAP 和 guest 对宿主管理面的访问；在 bridge family 防止外部伪造两个 guest MAC；记录 stateful response 规则和 drop counter；跨不可信网络时增加认证加密。多租户扩展还需使用独立 switch/VLAN/ACL，因为广播和组播会复制到所有 active port。
+
+可用性方面，当前单线程服务端可能被“连接后不发送完整 32 字节头”的 peer 长期占用；客户端 1 秒 socket deadline 也不等同于显式非阻塞 connect deadline。这些限制应在真实外联或多租户部署前通过服务端 read/write/idle deadline、并发连接上限和 rate limit 补齐。
+
 ### 4.7 可观测性、指标定义与验收证据
 
 客户端输出 `GIPC_STARRY_STATUS` 和 `GIPC_STARRY_METRIC`，聚合器输出 `GIPC_AGGREGATE`。指标定义如下：
 
+![GIPC 验证与指标流水线](assets/gipc-observability.svg)
+
 | 指标 | 计算方式 | 用途 |
 | --- | --- | --- |
-| 请求成功率 | `success / requests` | 判断应用层请求是否全部完成 |
+| `requests` / `success` | 请求总数 / 收到合法 STATUS 的请求数 | 基础计数 |
+| client `success_rate` | `1[success == requests]`，值为 0 或 1 | 进程级“是否全部成功”布尔标志，不是小数比例 |
+| aggregate `success_rate` | `Σsuccess / Σrequests`，输出 6 位小数 | 多样本的真实请求成功比例 |
 | 应用层错误 | ERROR 帧、CRC/版本/类型/序列校验失败计数 | 区分业务拒绝和协议异常 |
-| 超时次数 | connect/read/write 超时累计 | 判断链路或服务端响应是否失活 |
-| 重连次数 | 非首次尝试建立的 TCP 连接数 | 衡量断连恢复压力 |
-| 恢复成功率 | 发生重连后最终收到合法 STATUS 的请求比例 | 判断自动恢复是否真正完成 |
-| RTT P50/P95 | 单请求发送到匹配响应的单调时钟差分 | 衡量典型和尾部请求延迟 |
-| 有效吞吐量 | 成功响应 payload 字节数 / 请求响应耗时 | 排除连接失败后的有效应用数据率 |
+| `timeouts` | connect、write、header read、payload 超限/读取失败的 attempt 次数 | 实际口径是“超时或传输尝试失败”，并非每次都经历 deadline |
+| `attempts` | 每次创建 socket 并尝试 connect 均累加 | 衡量请求的传输成本 |
+| `reconnects` | 同一逻辑请求中 attempt>0 且 connect 成功的次数 | 正常请求之间主动重新连接不计入 |
+| client `recovery` | `1[success>0 ∧ reconnects>0]` | 进程级恢复布尔标志，不是恢复率 |
+| aggregate `recoveries` | 日志中 `recovery=1` 的 sample 数 | 成功恢复运行次数，不是恢复请求百分比 |
+| `rtt_ns` | 成功 attempt 从发送前到完整 STATUS 校验后的平均值 | 不包含此前失败 attempt 的耗时 |
+| `rtt_p50_ns/p95_ns` | 对每条 metric 的 run 级平均 RTT 排序后取 `floor((M-1)q)` | 当前是 run 平均值的经验分位点，不是每请求原始分位点 |
+| `throughput_bps` | 对每个成功响应计算 `payload_len×10^9/RTT` 后求平均 | 字段名沿用 bps，但代码未乘 8，实际量纲是有效响应 payload B/s |
 
-验证分为三层：`cargo test -p guest-ip-protocol` 覆盖帧和可靠会话状态机；C 客户端与 ArceOS 服务端构建/Clippy 检查覆盖两端接口；`run-qemu-aarch64-starry-rtos-gipc.sh`、`verify_metrics.py` 和 `aggregate_metrics.py` 组成 QEMU 运行和指标验收入口。成功日志至少应按顺序包含 `GIPC_STARRY_NET_READY`、`GIPC_RTOS_READY`、`GIPC_RTOS_LISTEN`、`GIPC_STARRY_STATUS` 和 `GIPC_STARRY_METRIC`；任何 timeout、ERROR 或成功率不足均以非零状态结束。
+聚合器对各 run 的 `errors`、`timeouts`、`reconnects` 和 `recovery` 求和；只要总成功数等于总请求数且应用错误为零，即使存在已经恢复的 timeout/reconnect，仍返回成功。这使故障注入结果能够保留恢复事件，而不是把“发生过故障”和“最终未恢复”混为一谈。
+
+#### 4.7.1 自动门禁的实际判据
+
+| 层次 | 工具/配置 | 当前判据 |
+| --- | --- | --- |
+| QEMU 在线门禁 | `qemu-aarch64-starry-rtos-gipc.toml` | 180 秒；success regex 要求 `RTOS_READY → STARRY_STATUS → STARRY_METRIC`；fail regex 捕获 panic、RTOS_ERROR、STARRY_TIMEOUT |
+| 单日志验证 | `verify_metrics.py` | 必须有 STATUS/METRIC；不得有 STARRY_TIMEOUT、RTOS_ERROR、STARRY_ERROR；首个 metric 必须 `requests==success` 且 RTT/吞吐>0 |
+| 多日志聚合 | `aggregate_metrics.py` | 必须找到 metric；输出成功率、错误、超时、重连、恢复、P50/P95 和平均吞吐；全部请求成功且 errors=0 才返回 0 |
+
+`GIPC_AGGREGATE` 是保存 guest log 后由 host 脚本生成的离线产物，不是 guest 原生日志，也不在当前 QEMU success regex 中。在线 regex 尚未直接要求 `GIPC_STARRY_NET_READY`、`GIPC_RTOS_LISTEN`、`GIPC_STARRY_ERROR` 或 `GIPC_RTOS_RECOVERABLE_ERROR`；正式交付采用比自动 regex 更强的检查清单：地址和 listen marker 必须存在，所有 sequence 对应，`requests=success`、`errors=0`、RTT/吞吐为正，正常基线不出现 recoverable error；故障注入若出现 recoverable error，随后必须重新 CONNECTED、收到 STATUS 且 `recovery=1`。
+
+#### 4.7.2 分层验证矩阵
+
+| 验证层 | 命令或用例 | 主要覆盖 | 不替代的证据 |
+| --- | --- | --- | --- |
+| 协议单元 | `cargo test -p guest-ip-protocol` | round-trip、CRC 损坏、尾随字节、retry budget、duplicate/out-of-order | 不启动 socket、VirtIO-net 或 guest |
+| 静态质量 | protocol/server check+Clippy、C `-Wall -Wextra -Werror`、Python compile、fmt/diff-check | 两端构建、类型和脚本语法 | 不证明实际包路径 |
+| 确定性恢复 | `test_linux_client.py` | mock peer 第一次 accept 后立即关闭，第二次返回合法 STATUS；断言 attempts=2/timeouts=1 | 只证明 host C client 恢复，不替代双 guest 性能 |
+| 双 guest 端到端 | `run-qemu-aarch64-starry-rtos-gipc.sh` | Axvisor、两个 VM、VirtIO-net、ARP/TCP、GIPC 请求响应和日志链 | 性能数值应从归档日志读取，不编造固定 P50/P95 |
+| 离线强验收 | `verify_metrics.py guest.log` + `aggregate_metrics.py guest.log` | marker、错误、成功率、RTT 和吞吐统计 | 依赖输入日志采样范围 |
+
+建议归档以下结构化日志模板，尖括号字段由实际运行填充：
+
+```text
+GIPC_RTOS_READY
+GIPC_RTOS_LISTEN ip=10.0.42.2 port=4242
+GIPC_STARRY_NET_READY interface=eth0 address=10.0.42.1/24 peer=10.0.42.2
+GIPC_RTOS_CONNECTED peer=10.0.42.1:<ephemeral-port>
+GIPC_STARRY_STATUS seq=1 payload=8 attempts=<A> timeouts=<T>
+GIPC_STARRY_METRIC requests=<N> success=<S> success_rate=<0|1> errors=<E> timeouts=<T> attempts=<A> reconnects=<R> recovery=<0|1> rtt_ns=<mean> throughput_bps=<mean-effective-B/s>
+GIPC_METRICS_OK
+GIPC_AGGREGATE requests=<N> success=<S> success_rate=<ratio> app_errors=<E> timeouts=<T> reconnects=<R> recoveries=<runs> rtt_p50_ns=<P50> rtt_p95_ns=<P95> throughput_avg_bps=<B/s>
+```
 
 ## 5. 任务三：AI 联动控制应用设计
 
