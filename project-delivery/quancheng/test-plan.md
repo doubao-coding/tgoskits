@@ -66,19 +66,25 @@
 这组数据的作用不是证明 Axvisor guest 比直接 QEMU 更快，而是说明“把完整 RTOS 作为普通 guest 运行”会把调度和中断路径继续放在虚拟化链路里：调度、中断和抢占项仍有约 4% 到 6% 的虚拟化开销。对于 8ms 双轮足平衡控制，这类开销和抖动会直接进入控制周期预算。
 
 
-### 3)qemu + axvisor(amp方案)
-[Task Switch] n=1000 avg=5263 min=3600 max=212900 jitter=209300 ns
-[preemption] n=1000 avg=4271 min=2800 max=202700 jitter=199900 ns
-[IRQ Latency] n=500 avg=2859 min=1500 max=52200 jitter=50700 ns
-[Tick Delta] n=500 avg=999907 min=957500 max=1007600 jitter=50100 ns (expected=1000000 ns)
-[Sem Shuffle] n=1000 avg=4602 min=2900 max=180000 jitter=177100 ns
+### 3) qemu + axvisor(amp 方案)
 
-### 4)rk3588 + axvisor(amp方案)
-[Task Switch] n=1000 avg=1066 min=875 max=1458 jitter=583 ns
-[preemption] n=1000 avg=1023 min=875 max=1459 jitter=584 ns
-[IRQ Latency] n=500 avg=654 min=292 max=2792 jitter=2500 ns
-[Tick Delta] n=500 avg=999999 min=998083 max=1002167 jitter=4084 ns (expected=1000000 ns)
-[Sem Shuffle] n=1000 avg=1022 min=875 max=1167 jitter=292 ns
+| 指标 | n | avg | min | max | jitter | 备注 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Task Switch | 1000 | 5263 ns | 3600 ns | 212900 ns | 209300 ns | 任务切换 |
+| Preemption | 1000 | 4271 ns | 2800 ns | 202700 ns | 199900 ns | 抢占 |
+| IRQ Latency | 500 | 2859 ns | 1500 ns | 52200 ns | 50700 ns | 中断延迟 |
+| Tick Delta | 500 | 999907 ns | 957500 ns | 1007600 ns | 50100 ns | 期望 1000000 ns |
+| Sem Shuffle | 1000 | 4602 ns | 2900 ns | 180000 ns | 177100 ns | 信号量唤醒/切换 |
+
+### 4) rk3588 + axvisor(amp 方案)
+
+| 指标 | n | avg | min | max | jitter | 备注 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Task Switch | 1000 | 1066 ns | 875 ns | 1458 ns | 583 ns | 任务切换 |
+| Preemption | 1000 | 1023 ns | 875 ns | 1459 ns | 584 ns | 抢占 |
+| IRQ Latency | 500 | 654 ns | 292 ns | 2792 ns | 2500 ns | 中断延迟 |
+| Tick Delta | 500 | 999999 ns | 998083 ns | 1002167 ns | 4084 ns | 期望 1000000 ns |
+| Sem Shuffle | 1000 | 1022 ns | 875 ns | 1167 ns | 292 ns | 信号量唤醒/切换 |
 
 ![QEMU 环境三种实时路径对比](assets/amp-qemu-three-way.svg)
 
