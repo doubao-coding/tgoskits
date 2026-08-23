@@ -1,3 +1,6 @@
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicIsize, Ordering};
+
 macro_rules! def_test_sched {
     ($name:ident, $scheduler:ty, $task:ty) => {
         mod $name {
@@ -155,5 +158,127 @@ fn rr_preempt_preserves_slice_but_forced_reschedule_rotates() {
         *scheduler.pick_next_task().unwrap().inner(),
         1,
         "forced remote reschedule must rotate the current task behind queued work",
+    );
+}
+
+/// A test task that exposes a configurable realtime priority.
+struct RtTestTask {
+    id: usize,
+    priority: AtomicIsize,
+}
+
+impl RtTestTask {
+    fn new_task(id: usize, priority: isize) -> Arc<crate::RtFifoTask<Self>> {
+        Arc::new(crate::RtFifoTask::new(Self {
+            id,
+            priority: AtomicIsize::new(priority),
+        }))
+    }
+}
+
+impl crate::RtPriority for RtTestTask {
+    fn rt_priority(&self) -> isize {
+        self.priority.load(Ordering::Acquire)
+    }
+
+    fn set_rt_priority(&self, priority: isize) -> bool {
+        self.priority.store(priority, Ordering::Release);
+        true
+    }
+}
+
+#[test]
+fn rt_fifo_picks_higher_priority_before_fifo_order() {
+    use crate::{BaseScheduler, RtFifoScheduler};
+
+    let mut scheduler = RtFifoScheduler::<RtTestTask>::new();
+    // Lower priority is enqueued first.
+    scheduler.add_task(RtTestTask::new_task(0, 1));
+    scheduler.add_task(RtTestTask::new_task(1, 10));
+
+    let next = scheduler.pick_next_task().unwrap();
+    assert_eq!(
+        next.inner().id,
+        1,
+        "higher priority task must run before the earlier enqueued lower priority task",
+    );
+}
+
+#[test]
+fn rt_fifo_preserves_fifo_order_within_same_priority() {
+    use crate::{BaseScheduler, RtFifoScheduler};
+
+    let mut scheduler = RtFifoScheduler::<RtTestTask>::new();
+    scheduler.add_task(RtTestTask::new_task(0, 5));
+    scheduler.add_task(RtTestTask::new_task(1, 5));
+    scheduler.add_task(RtTestTask::new_task(2, 5));
+
+    assert_eq!(scheduler.pick_next_task().unwrap().inner().id, 0);
+    assert_eq!(scheduler.pick_next_task().unwrap().inner().id, 1);
+    assert_eq!(scheduler.pick_next_task().unwrap().inner().id, 2);
+}
+
+#[test]
+fn rt_fifo_tick_preempts_only_for_higher_priority_ready_task() {
+    use crate::{BaseScheduler, RtFifoScheduler};
+
+    let mut scheduler = RtFifoScheduler::<RtTestTask>::new();
+    let current = RtTestTask::new_task(0, 5);
+    // Equal priority ready task: no preemption for realtime (priority > 0) tasks.
+    scheduler.add_task(RtTestTask::new_task(1, 5));
+    assert!(!scheduler.task_tick(&current));
+
+    // Higher priority ready task: must request preemption.
+    scheduler.add_task(RtTestTask::new_task(2, 10));
+    assert!(
+        scheduler.task_tick(&current),
+        "a higher priority ready task must request a reschedule on tick",
+    );
+}
+
+#[test]
+fn rt_fifo_tick_rotates_default_priority_runtime_tasks() {
+    use crate::{BaseScheduler, RtFifoScheduler};
+
+    let mut scheduler = RtFifoScheduler::<RtTestTask>::new();
+    // Default priority (<= 0) tasks yield to an equal-priority ready task so a
+    // runtime pool of default-priority work makes progress.
+    let current = RtTestTask::new_task(0, 0);
+    scheduler.add_task(RtTestTask::new_task(1, 0));
+    assert!(
+        scheduler.task_tick(&current),
+        "default-priority tasks must rotate on tick",
+    );
+}
+
+#[test]
+fn rt_fifo_tick_does_not_rotate_equal_realtime_priority_tasks() {
+    use crate::{BaseScheduler, RtFifoScheduler};
+
+    let mut scheduler = RtFifoScheduler::<RtTestTask>::new();
+    let current = RtTestTask::new_task(0, 7);
+    scheduler.add_task(RtTestTask::new_task(1, 7));
+    assert!(
+        !scheduler.task_tick(&current),
+        "equal realtime-priority tasks must not be rotated by a tick",
+    );
+}
+
+#[test]
+fn rt_fifo_set_priority_reorders_ready_task() {
+    use crate::{BaseScheduler, RtFifoScheduler};
+
+    let mut scheduler = RtFifoScheduler::<RtTestTask>::new();
+    let low = RtTestTask::new_task(0, 1);
+    let high = RtTestTask::new_task(1, 1);
+    scheduler.add_task(low.clone());
+    scheduler.add_task(high.clone());
+
+    // Boost `low` above `high` while it is still queued.
+    assert!(scheduler.set_priority(&low, 20));
+    assert_eq!(
+        scheduler.pick_next_task().unwrap().inner().id,
+        0,
+        "priority change must immediately reorder the ready queue",
     );
 }
