@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="760" viewBox="0 0 1440 760" role="img" aria-labelledby="title desc">
+  <title id="title">GIPC 故障注入、恢复边界与验收观测面</title>
+  <desc id="desc">从启动配置、TCP 传输和协议帧三个注入面，经客户端与服务端恢复边界，到最终日志、退出码和指标证据的测试流水线。</desc>
+  <defs>
+    <style>
+      .bg{fill:#f8fafc}.title{font:700 28px Arial,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:#0f172a}.subtitle{font:400 13px Arial,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:#475569}.section{font:700 13px Arial,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:#64748b;letter-spacing:1px}.head{font:700 17px Arial,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:#0f172a}.body{font:400 12px Arial,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:#334155}.small{font:400 11px Arial,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:#475569}.inject{fill:#fff7ed;stroke:#f97316;stroke-width:1.6}.boundary{fill:#eff6ff;stroke:#2563eb;stroke-width:1.6}.observe{fill:#f0fdf4;stroke:#16a34a;stroke-width:1.6}.risk{fill:#fff1f2;stroke:#e11d48;stroke-width:1.4}.arrow{fill:none;stroke:#64748b;stroke-width:2;marker-end:url(#arrow)}.ok{fill:none;stroke:#16a34a;stroke-width:2.2;marker-end:url(#green)}.error{fill:none;stroke:#ea580c;stroke-width:2.2;marker-end:url(#orange)}.fail{fill:none;stroke:#dc2626;stroke-width:2.2;marker-end:url(#red)}
+    </style>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker>
+    <marker id="green" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#16a34a"/></marker>
+    <marker id="orange" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#ea580c"/></marker>
+    <marker id="red" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#dc2626"/></marker>
+  </defs>
+  <rect class="bg" width="1440" height="760"/>
+  <text class="title" x="720" y="43" text-anchor="middle">GIPC 故障注入、恢复边界与验收观测面</text>
+  <text class="subtitle" x="720" y="69" text-anchor="middle">每个故障用例同时固定注入位置、允许的恢复语义、最终退出状态和可复核证据</text>
+
+  <text class="section" x="55" y="112">故障注入面</text>
+  <rect class="inject" x="55" y="132" width="270" height="142" rx="12"/>
+  <text class="head" x="190" y="164" text-anchor="middle">启动与网络配置</text>
+  <text class="body" x="78" y="194">• 接口不存在 / 缺少 ip 工具</text><text class="body" x="78" y="218">• 地址或路由配置失败</text><text class="body" x="78" y="242">• listener 未就绪 / 端口拒绝</text>
+  <rect class="inject" x="365" y="132" width="270" height="142" rx="12"/>
+  <text class="head" x="500" y="164" text-anchor="middle">TCP 传输</text>
+  <text class="body" x="388" y="194">• close / silent peer</text><text class="body" x="388" y="218">• header、payload 短读</text><text class="body" x="388" y="242">• 三次 attempt 预算耗尽</text>
+  <rect class="inject" x="675" y="132" width="270" height="142" rx="12"/>
+  <text class="head" x="810" y="164" text-anchor="middle">GIPC 帧变异</text>
+  <text class="body" x="698" y="194">• version / length / CRC</text><text class="body" x="698" y="218">• type / error / sequence</text><text class="body" x="698" y="242">• duplicate / out-of-order</text>
+
+  <path class="arrow" d="M325 203 H350"/><path class="arrow" d="M635 203 H660"/><path class="arrow" d="M945 203 H1002"/>
+
+  <text class="section" x="1007" y="112">恢复与拒绝边界</text>
+  <rect class="boundary" x="1007" y="132" width="378" height="142" rx="12"/>
+  <text class="head" x="1196" y="164" text-anchor="middle">客户端 attempt + 服务端 accept loop</text>
+  <text class="body" x="1030" y="194">客户端：同一请求最多 3 attempt；仅传输失败重试</text>
+  <text class="body" x="1030" y="218">服务端：坏连接返回 accept；sequence window 按连接</text>
+  <text class="body" x="1030" y="242">协议错误：ERROR 或 fail-closed，不伪造 STATUS</text>
+
+  <text class="section" x="55" y="329">结果分流</text>
+  <path class="ok" d="M1196 274 V338 H253 V374"/>
+  <path class="error" d="M1196 274 V321 H720 V374"/>
+  <path class="fail" d="M1196 274 V304 H1187 V374"/>
+  <rect class="observe" x="55" y="374" width="396" height="126" rx="12"/>
+  <text class="head" x="253" y="407" text-anchor="middle">恢复成功</text>
+  <text class="body" x="80" y="437">后续连接收到同序列合法 STATUS</text>
+  <text class="body" x="80" y="462">success=requests · reconnects≥1 · recovery=1 · exit 0</text>
+  <rect class="inject" x="522" y="374" width="396" height="126" rx="12"/>
+  <text class="head" x="720" y="407" text-anchor="middle">预期协议拒绝</text>
+  <text class="body" x="547" y="437">ERROR code=4/5/6 或 fail-closed 关闭坏连接</text>
+  <text class="body" x="547" y="462">错误计数、同 sequence、后续合法连接仍可用</text>
+  <rect class="risk" x="989" y="374" width="396" height="126" rx="12"/>
+  <text class="head" x="1187" y="407" text-anchor="middle">预算耗尽或已知边界</text>
+  <text class="body" x="1014" y="437">GIPC_STARRY_TIMEOUT / 非零退出 / success&lt;requests</text>
+  <text class="body" x="1014" y="462">半帧不关闭：服务端当前无 read/idle deadline</text>
+
+  <text class="section" x="55" y="552">统一证据归档</text>
+  <rect class="boundary" x="55" y="572" width="1330" height="132" rx="12"/>
+  <text class="head" x="720" y="604" text-anchor="middle">marker 顺序 + 退出码 + 原始指标 + 环境指纹</text>
+  <text class="body" x="88" y="638">网络/服务：NET_READY · RTOS_LISTEN · CONNECTED · RECOVERABLE_ERROR</text>
+  <text class="body" x="88" y="666">业务/指标：STATUS(seq) · ERROR(code) · requests/success/errors/timeouts/attempts/reconnects/recovery · RTT · 有效 B/s</text>
+  <text class="small" x="88" y="689">同时保存 commit、QEMU/工具链版本、rootfs SHA-256、完整命令、日志 SHA-256；host mock RTT 不进入双 guest 性能数据。</text>
+</svg>
