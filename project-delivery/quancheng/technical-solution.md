@@ -154,7 +154,21 @@ Axvisor 实时 CPU 预留
   -> 实时控制关键路径获得更稳定的执行机会
 ```
 
-### 3.5 隔离设计
+### 3.5 实测对比与 AMP 优势
+
+任务一的实测对比采用两层口径：先在 QEMU 中比较“直接运行 RTOS”“Axvisor 承载 RTOS guest”和“Axvisor AMP 实时路径”三种方案，再在 RK3588 真机上单独展示 Axvisor AMP 的控制侧实时数据。这样可以避免把不同量纲的数据混为同一类跑分，同时突出 AMP 方案的核心收益：不是让通用 guest 跑分超过裸 RTOS，而是把高频控制闭环从 guest/vCPU/虚拟中断路径中移出。
+
+![QEMU 环境三种实时路径对比](assets/amp-qemu-three-way.svg)
+
+第一张图中，`qemu + freertos` 是 FreeRTOS 直接运行的基线；`qemu + axvisor + freertos(guest)` 表示完整 RTOS 作为 Axvisor guest 运行，noload 下仍保留约 93.9% 到 99.9% 的基线效率，但调度、中断和抢占路径继续经过 vCPU、虚拟中断和 hypervisor 返回链路；`qemu + axvisor(amp方案)` 则把实时控制路径放在 Axvisor 侧保留执行资源上，QEMU 下任务切换、抢占、中断和信号量平均耗时处于 2.859us 到 5.263us 区间。
+
+![RK3588 真机 Axvisor AMP 实测数据](assets/amp-rk3588-realtime.svg)
+
+第二张图只展示真机 Axvisor AMP 数据。RK3588 上任务切换平均 `1066 ns`，抢占平均 `1023 ns`，中断平均 `654 ns`，信号量 shuffle 平均 `1022 ns`，1ms tick jitter 为 `4084 ns`。对于双轮足机器人 8ms 平衡闭环，`4084 ns` 只占周期预算约 `0.0511%`，说明 AMP 路径给 EKF/LQR 控制计算、MPU6050 读取、Lingkong 电机 UART 事务和安全降级逻辑留下了主要时间预算。
+
+AMP 方案相比单纯“RTOS guest 虚拟化”的优势体现在控制路径结构上：智能侧 StarryOS 可以运行 Python、NPU 推理、文件系统和网络协议等通用负载；实时侧控制闭环则不再依赖 guest OS 调度和虚拟设备路径，只通过 mailbox 接收低频目标命令。AI 侧推理延迟可能达到数十或数百毫秒，但它只改变下一段运动目标；真正维持机器人站稳的是 8ms 周期任务，因此必须由实时 CPU 预留、绑核、RT FIFO 和 PI mutex 共同保护。
+
+### 3.6 隔离设计
 
 隔离设计包括内存隔离、CPU 时间隔离、设备访问隔离和同步路径隔离。内存隔离通过虚拟地址空间和 VM 配置限定智能侧 guest 可访问范围；CPU 时间隔离通过 #2160 的实时 CPU 预留、vCPU 配置和绑核策略降低互相干扰；设备访问隔离通过直通设备、虚拟设备和排除设备列表控制访问边界；同步路径隔离则由 #2162 补齐，避免实时侧高优先级任务在 mutex 争用中被普通任务间接阻塞。
 
@@ -170,7 +184,7 @@ Axvisor 实时 CPU 预留
 
 隔离能力的验证不只依赖源码说明，还应通过压力测试和异常注入形成证据。例如在智能侧执行 CPU/内存压力负载，同时持续测量 Axvisor RT 周期任务延迟和通信响应时间；在实时任务路径中构造低优先级 owner、高优先级 waiter 和中优先级干扰任务，验证中优先级任务不能长期阻止 owner 释放 mutex。
 
-### 3.6 预期效果与边界
+### 3.7 预期效果与边界
 
 任务一预期交付一套可复现的 Axvisor AMP 实时运行方案，能够说明智能侧 guest 如何配置、实时 CPU 如何预留、Axvisor 关键路径如何测量，以及实时控制路径如何不被智能侧负载显著破坏。#2160 是实时 CPU 预留和隔离主线；#2163、#2164 和 #2165 补齐 Axvisor 启动、板级 I/O 和调频路径；#2161 和 #2162 作为实时任务调度与同步语义支撑。
 
@@ -178,7 +192,7 @@ Axvisor 实时 CPU 预留
 
 | 验收关注点 | 已有证据 | 后续补强方向 |
 | --- | --- | --- |
-| Axvisor CPU 隔离 | #2160 的实时 CPU 预留设计与 host glue 接入 | 增加板级多负载下的 RT 周期延迟记录 |
+| Axvisor CPU 隔离 | #2160 的实时 CPU 预留设计与 host glue 接入，`amp-qemu-three-way.svg` 和 `amp-rk3588-realtime.svg` 的对比数据 | 增加板级多负载下的 RT 周期延迟记录 |
 | Axvisor I/O 与调频路径 | #2163、#2164、#2165 的 guest 启动、SD 主机和 RK3588 governor 修复 | 增加板级 guest 加载、I/O 压力和频率 readout 记录 |
 | RT FIFO 调度 | #2161 的 scheduler 单测和 ArceOS QEMU case | 作为预留 CPU 实时任务语义验证 |
 | Mutex PI | #2162 的 QEMU PI 场景、clippy 和设计文档 | 补齐 per-mutex donation 重算和 priority-aware wait queue |
