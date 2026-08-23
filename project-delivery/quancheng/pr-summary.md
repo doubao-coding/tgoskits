@@ -19,7 +19,7 @@
 | [#2162](https://github.com/rcore-os/tgoskits/pull/2162) | `feat(axtask): add mutex priority inheritance` | 基于 #2161 的 RT FIFO 调度补齐 mutex 优先级继承，降低实时任务在锁等待中被普通任务间接阻塞的风险 | `os/arceos/modules/axtask/`、`components/axsched/`、`test-suit/arceos/rust/src/task/rt_fifo.rs`、`docs/design/axtask-priority-inheritance.md` | `cargo xtask clippy --package ax-task`、`cargo xtask clippy --package ax-sched`、`sched-rt-fifo` QEMU PI 场景验证 | 已提交到 `dev`，依赖 #2161 先合入 |
 | [#2163](https://github.com/rcore-os/tgoskits/pull/2163) | `feat(ax-driver): add IRQ-driven virtio-blk block controller and Axvisor QEMU starry guest smoke` | 新增 IRQ 驱动的 virtio-blk 块设备控制器（描述符表、一致性 DMA、队列所有权契约），并配套 Axvisor QEMU aarch64 starry guest 配置与 smoke 测试用例，支撑 guest 从 virtio-blk 根盘启动 | `drivers/ax-driver/src/virtio/`、`os/axvisor/configs/`、`test-suit/axvisor/` | ax-driver 全 feature clippy；QEMU smoke 用例启动 guest 并命中成功标志 | 已提交到 `dev` |
 | [#2164](https://github.com/rcore-os/tgoskits/pull/2164) | `fix(axvisor): enable rockchip-dwmmc on OrangePi 5 Plus` | 板级与测试构建配置启用 `ax-driver/rockchip-dwmmc`：SD 卡位于 mmc@fe2c0000 的 DW 主机之后，缺该 feature 时 axvisor 无法从 fs 加载 guest 镜像 | `os/axvisor/configs/board/`、`test-suit/axvisor/normal/board-orangepi-5-plus/` | axvisor 板级构建；板上 SD 枚举与 guest 内核从 ext4 加载 | 已提交到 `dev` |
-| [#2165](https://github.com/rcore-os/tgoskits/pull/2165) | `fix(ax-driver): attribute RK3588 governor busy by FDT cpu topology` | 调频 governor 的 busy 归因改为按 guest FDT `/cpus` 节点的 SCMI clock id 映射逻辑 CPU 到实际簇；无在线 CPU 的簇不再被误降频；降档设 boot OPP 地板；新增只读频率 readout | `drivers/ax-driver/src/soc/rockchip/` | 归因单测（clock id 表、物理兜底分区、单大核 guest 映射）；板上 gov 日志与频率 readout 验证 | 已提交到 `dev` |
+| [#2165](https://github.com/rcore-os/tgoskits/pull/2165) | `fix(ax-driver): attribute RK3588 governor busy by FDT cpu topology` | 调频 governor 的 busy 归因改为按 guest FDT `/cpus` 节点的 SCMI clock id 映射逻辑 CPU 到实际簇；无在线 CPU 的簇不再被误降频；降档设 boot OPP 地板；新增只读频率 readout | `drivers/ax-driver/src/soc/rockchip/` | 归因单测（clock id 表、物理兜底分区、单大核 guest 映射）；板上 gov 日志与频率 readout 验证 | PR open，base `dev` |
 ## 3. 任务二：客户机通信底座 PR
 
 任务二相关提交和 PR 主要体现客户机之间的通信能力，包括虚拟网络配置、IP 链路、应用层协议、请求响应、心跳、超时、重试和异常处理。前三项为通信链路的底层前置提交，后五项为直接实现通信能力的 PR。
@@ -37,13 +37,18 @@
 
 ## 4. 任务三：AI 联动应用 PR
 
-任务三相关 PR 主要体现 AI 与控制联动的应用闭环。当前先按工作内容预留 PR 位置，后续再补具体 PR 编号、标题和合入状态。
+任务三相关 PR/提交主要体现 AI 与控制联动的应用闭环。除已明确编号的 PR 外，`xiaohui` 在 `origin/xiaohui/sensevoice` 上已经提交过 SenseVoice QEMU 应用、Axvisor+StarryOS 端到端用例、OrangePi 5 Plus RK3588 NPU 板级适配、启动注入和下载稳定性修复；这些内容先以 commit 形式记录，后续如有 PR 编号再补齐。
 
-| PR 编号/链接 | PR 标题 | 主要修改内容 | 涉及目录 | 测试或验证方式 | 状态 |
+| PR/提交 | 标题 | 主要修改内容 | 涉及目录 | 测试或验证方式 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| 待补 | 待补 | 模型应用生态适配：StarryOS 侧适配 SenseVoice/RKNN runtime、音频前处理、CTC 解码和控制命令映射 | 待补 | 样例 wav 推理、转写结果、命令 token 输出 | 待补 |
-| 待补 | 待补 | 模型性能优化：guest 绑核、日志降噪、NPU ioctl 计时、readahead、调频归因等性能收敛工作 | 待补 | 板级 `[perf]` 日志、`sensevoice-perf.svg`、`test-plan.md` 性能表 | 待补 |
-| 待补 | 待补 | 应用启动优化：Axvisor 启动、StarryOS guest autostart、rootfs/模型加载路径和样例输入准备 | 待补 | 启动串口日志、`minicom_output.jpg`、模型加载耗时 | 待补 |
+| [`672793b95`](https://github.com/rcore-os/tgoskits/commit/672793b9572855a3bd7b795c1151c8490aad4542) | `feat(starry-apps): add sensevoice QEMU app running SenseVoice ASR on StarryOS` | 增加 StarryOS QEMU SenseVoice ASR 应用，准备 sherpa-onnx、glibc runtime、模型、tokens 和 zh/en 样例音频 | `apps/starry/sensevoice/` | QEMU aarch64 guest 内运行 L0-L3 测试，zh/en 转写匹配参考文本 | 已提交到 `origin/xiaohui/sensevoice` |
+| [`a1444c0ee`](https://github.com/rcore-os/tgoskits/commit/a1444c0ee68496d1db27e35a1557277667ba711c) | `feat(axvisor): add end-to-end SenseVoice ASR case for the QEMU starry guest` | 将 Axvisor、StarryOS guest、virtio-blk rootfs 和 SenseVoice 测试串成端到端 QEMU 用例 | `test-suit/axvisor/normal/qemu-starry/sensevoice/` | Axvisor QEMU sensevoice case PASS，记录 hypervisor 层 RTF 开销 | 已提交到 `origin/xiaohui/sensevoice` |
+| [`7d292062c`](https://github.com/rcore-os/tgoskits/commit/7d292062c9a17c6318c3f294e59252a1f217f81d) | `feat(starry-apps): add sensevoice-rknn board app skeleton for OrangePi 5 Plus` | 增加 OrangePi 5 Plus RK3588 NPU SenseVoice 板级应用骨架，包含 RKNN runtime 调用、fbank/LFR/CMVN/CTC、测试脚本和 host frontend 数值检查 | `apps/starry/sensevoice-rknn/` | host frontend 数值对拍；板级 runbook 记录固定 shape、driver/runtime 风险点 | 已提交到 `origin/xiaohui/sensevoice` |
+| [`54ad820b3`](https://github.com/rcore-os/tgoskits/commit/54ad820b3f5484d8f4f46586c6136f9c9c5ed06c) | `feat(sensevoice-rknn): wire axvisor+starry+NPU path on OrangePi 5 Plus` | 打通 Axvisor -> StarryOS guest -> RK3588 NPU passthrough -> librknnrt 的板级链路，修正 tensor attr、batch concat、输出 reshape 和 guest 内存配置 | `apps/starry/sensevoice-rknn/`、`os/axvisor/configs/board/`、`os/axvisor/configs/vms/`、`test-suit/axvisor/normal/board-orangepi-5-plus/` | 板上运行到 `rknn_init/run/outputs`，AXVISOR-BOARD-RUNBOOK 记录交付步骤和剩余风险 | 已提交到 `origin/xiaohui/sensevoice` |
+| [#2166](https://github.com/rcore-os/tgoskits/pull/2166) | `perf(rk3588): close the guest performance gap on OrangePi 5 Plus` | 模型性能优化：guest vCPU 绑定 A76 大核、板级日志降噪、card1 ioctl 聚合计时、readahead 窗口扩至 1 MiB，并配合 #2165 的 RK3588 governor 归因修复收敛性能差距 | `os/axvisor/configs/vms/`、`os/StarryOS/kernel/src/pseudofs/dev/`、`fs/ax-fs-ng/src/file/cache/` | 板级 `[perf]` 日志；推理 2.96s→1.72s，叠加动态调频后 1.46s；NPU submit 7.78ms/次接近原生 | PR open，base `dev` |
+| [`58cb3b197`](https://github.com/rcore-os/tgoskits/commit/58cb3b197eaf3f9eb00977939fbb05d39ad35acf) | `fix(axvisor): automate starry guest kernel load and fail fast on hung guests` | 应用启动优化：Axvisor QEMU Starry guest 改为构建期嵌入 kernel，健康启动失败时快速失败，避免手工注入和长时间挂起 | `os/axvisor/configs/vms/qemu/aarch64/`、`test-suit/axvisor/normal/qemu-starry/` | smoke PASS，sensevoice PASS，并对 EL2 异常循环设置失败判定 | 已提交到 `origin/xiaohui/sensevoice` |
+| [`2b92958ff`](https://github.com/rcore-os/tgoskits/commit/2b92958ff8254381eca63a6ab692ef18ed58cd18) | `fix(axbuild): inject overlay via cd+basename to debugfs-resolvable paths` | 应用启动优化：修复 rootfs overlay 注入路径，避免 debugfs 将绝对路径写成不可解析文件名；放宽不可复现 glibc arm64 SHA gate | `scripts/axbuild/src/rootfs/inject.rs`、`apps/starry/sensevoice/prebuild.sh` | `cargo xtask starry app qemu -t sensevoice --arch aarch64` 到达 `SENSEVOICE_TEST_PASSED` | 已提交到 `origin/xiaohui/sensevoice` |
+| [`e325b5aa2`](https://github.com/rcore-os/tgoskits/commit/e325b5aa2e7234088135b85cc039b572c88883f5) / [`b0022043f`](https://github.com/rcore-os/tgoskits/commit/b0022043f5ec18e3de6c8616c42d1c31e27ef19a) | SenseVoice 资产下载稳定性修复 | 应用启动优化：为模型、runtime、样例音频下载增加 mirror fallback、断点续传和指数退避重试，降低复现环境网络波动影响 | `apps/starry/sensevoice/prebuild.sh` | 受限网络和 transient TLS EOF 场景下 prebuild 可恢复 | 已提交到 `origin/xiaohui/sensevoice` |
 
 ## 5. 测试验收与文档 PR
 

@@ -575,6 +575,15 @@ Axvisor (EL2, SD 卡加载 guest)
 
 正确性方法是把推理路径与社区上游运行时（happyme531/SenseVoiceSmall-RKNN2 及模型作者的 rkvoice-stream）逐项对齐：tensor 查询枚举、输入构造（4 个提示帧 + LFR 语音帧）、kaldi 兼容 fbank 前端、CMVN 符号、输出布局与 CTC 解码；前端在宿主机用 kaldi-native-fbank 数值对拍（fbank 偏差 ≤ 3e-4，LFR+CMVN 后 ≤ 4e-5）。板上 zh/en 参考 wav 转写通过（fp16 精度边缘，漏 1-2 字），推理语义与原生 Linux 一致。
 
+关联 PR/提交如下：
+
+| PR/提交 | 对应工作 | 说明 |
+| --- | --- | --- |
+| [`672793b95`](https://github.com/rcore-os/tgoskits/commit/672793b9572855a3bd7b795c1151c8490aad4542) | StarryOS QEMU SenseVoice 应用 | 增加 CPU 版 SenseVoice ASR 应用、模型资产、glibc runtime 和 zh/en 样例测试，为模型生态适配提供可复现基线 |
+| [`a1444c0ee`](https://github.com/rcore-os/tgoskits/commit/a1444c0ee68496d1db27e35a1557277667ba711c) | Axvisor + StarryOS E2E 用例 | 将 StarryOS SenseVoice 应用放入 Axvisor QEMU guest 中端到端运行，验证 hypervisor 层不破坏应用路径 |
+| [`7d292062c`](https://github.com/rcore-os/tgoskits/commit/7d292062c9a17c6318c3f294e59252a1f217f81d) | RK3588 NPU 板级应用骨架 | 增加 `sensevoice-rknn` 板级应用、RKNN runtime 调用、fbank/LFR/CMVN/CTC 和 host frontend 数值检查 |
+| [`54ad820b3`](https://github.com/rcore-os/tgoskits/commit/54ad820b3f5484d8f4f46586c6136f9c9c5ed06c) | Axvisor + StarryOS + NPU 板级链路 | 打通 OrangePi 5 Plus 上 Axvisor、StarryOS guest、RK3588 NPU passthrough 和 librknnrt 的实际运行路径 |
+
 ### 5.4 模型性能优化
 
 智能侧推理最初与原生 Linux 差距明显（单条推理 2.96s vs 1.04s，模型加载 41.2s vs 0.65s）。通过在 card1 ioctl 层增加聚合计时仪表，逐项定位并收敛：
@@ -592,11 +601,27 @@ Axvisor (EL2, SD 卡加载 guest)
 
 ![SenseVoice 推理与模型加载性能对比](assets/sensevoice-perf.svg)
 
+关联 PR/提交如下：
+
+| PR/提交 | 对应工作 | 说明 |
+| --- | --- | --- |
+| [#2166](https://github.com/rcore-os/tgoskits/pull/2166) | RK3588 guest 性能收敛 | 覆盖 guest A76 绑核、日志降噪、card1 ioctl 聚合计时、readahead 扩大等性能优化，形成 `sensevoice-perf.svg` 和 `test-plan.md` 中的实测数据 |
+| [#2165](https://github.com/rcore-os/tgoskits/pull/2165) | RK3588 governor 拓扑归因修复 | 修复 SMP=1 guest busy 归因到错误 CPU 簇的问题，使实际运行大核不再被错误降频，是动态调频组推理 1.46s 的前置优化 |
+| [`54ad820b3`](https://github.com/rcore-os/tgoskits/commit/54ad820b3f5484d8f4f46586c6136f9c9c5ed06c) | 板级 NPU 执行路径 | 在 OrangePi 5 Plus 上跑到 `rknn_init/run/outputs`，为后续性能计时和差距定位提供实际板级路径 |
+
 ### 5.5 应用启动优化
 
 应用启动优化关注从 Axvisor 上电启动到 StarryOS 语音识别应用可执行的整段路径。任务三不是只看推理函数耗时，还要看开发板上是否能稳定加载 guest、挂载 rootfs、找到模型文件、初始化 RKNN runtime，并在演示输入到达前完成准备。
 
 当前启动路径中，Axvisor 从 SD 卡加载 StarryOS guest，guest 内部启动语音识别应用并读取模型文件。模型加载时间受 rootfs、SD 冷读、文件缓存和 runtime 初始化共同影响，因此文档中把模型加载、`rknn_init` 和单条推理分开记录。启动串口截图 [minicom_output.jpg](assets/minicom_output.jpg) 用于证明系统已经进入板级运行环境，演示视频 [video.mp4](assets/video.mp4) 用于证明语音命令能够驱动机器人动作。
+
+关联 PR/提交如下：
+
+| PR/提交 | 对应工作 | 说明 |
+| --- | --- | --- |
+| [`58cb3b197`](https://github.com/rcore-os/tgoskits/commit/58cb3b197eaf3f9eb00977939fbb05d39ad35acf) | Axvisor guest 自动加载与失败快返 | 将 StarryOS guest kernel 改为构建期嵌入，减少手工 rootfs 注入步骤，并在 guest 卡死时快速失败 |
+| [`2b92958ff`](https://github.com/rcore-os/tgoskits/commit/2b92958ff8254381eca63a6ab692ef18ed58cd18) | rootfs overlay 注入修复 | 修复 debugfs 绝对路径注入导致文件不可见的问题，使 SenseVoice rootfs 资产可被 guest 稳定解析 |
+| [`e325b5aa2`](https://github.com/rcore-os/tgoskits/commit/e325b5aa2e7234088135b85cc039b572c88883f5) / [`b0022043f`](https://github.com/rcore-os/tgoskits/commit/b0022043f5ec18e3de6c8616c42d1c31e27ef19a) | 资产下载稳定性 | 为 SenseVoice 模型、runtime 和样例音频下载增加镜像 fallback、断点续传和重试，降低复现环境网络波动对应用启动的影响 |
 
 ### 5.6 双轮足机器人实物闭环
 
