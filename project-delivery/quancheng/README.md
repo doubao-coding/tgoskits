@@ -14,6 +14,8 @@
 | [test-plan.md](test-plan.md) | 测试验收框架，覆盖启动、隔离、通信、性能、AI 联动和综合指标记录。 |
 | [pr-summary.md](pr-summary.md) | 参赛 PR 清单，用于整理各 PR 与三项任务之间的对应关系。 |
 | [assets/task3-ai-control.svg](assets/task3-ai-control.svg) | 任务三 AI 语音识别到 Axvisor 实时控制闭环架构图。 |
+| [assets/task3-code-architecture.svg](assets/task3-code-architecture.svg) | 任务三 StarryOS 应用、Axvisor 通道和实时控制任务的代码模块架构图。 |
+| [assets/task3-rt-loop.svg](assets/task3-rt-loop.svg) | Axvisor 预留实时 CPU 上 8ms 双轮足控制循环流程图。 |
 | [assets/control_voice.wav](assets/control_voice.wav) | 双轮足机器人语音控制输入样例，用于任务三 AI 联动演示。 |
 | [assets/video.mp4](assets/video.mp4) | 双轮足机器人端到端实物演示视频。 |
 | [assets/minicom_output.jpg](assets/minicom_output.jpg) | 开发板启动 Axvisor/客户机/实时任务的串口输出截图。 |

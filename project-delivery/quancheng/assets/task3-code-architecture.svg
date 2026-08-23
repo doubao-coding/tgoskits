@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
+  <title id="title">任务三代码模块架构图</title>
+  <desc id="desc">展示 StarryOS SenseVoice RKNN 应用、Axvisor 命令通道和实时控制任务之间的代码模块关系。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="#334155"/>
+    </marker>
+    <style>
+      .bg{fill:#f8fafc}.title{font:700 30px Arial,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:#0f172a}
+      .sub{font:400 14px Arial,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:#475569}
+      .h{font:700 20px Arial,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:#0f172a}
+      .label{font:700 15px Arial,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:#0f172a}
+      .body{font:400 12px Arial,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:#334155}
+      .small{font:400 11px Arial,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:#475569}
+      .starry{fill:#ecfdf5;stroke:#0f766e;stroke-width:2;rx:10}
+      .ax{fill:#eff6ff;stroke:#2563eb;stroke-width:2;rx:10}
+      .rt{fill:#fff7ed;stroke:#ea580c;stroke-width:2;rx:10}
+      .box{fill:#fff;stroke:#cbd5e1;stroke-width:1.3;rx:7}
+      .line{fill:none;stroke:#334155;stroke-width:2;marker-end:url(#arrow)}
+      .dash{fill:none;stroke:#64748b;stroke-width:1.4;stroke-dasharray:6 5;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect class="bg" width="1440" height="900"/>
+  <text class="title" x="720" y="46" text-anchor="middle">任务三代码模块架构</text>
+  <text class="sub" x="720" y="74" text-anchor="middle">StarryOS 负责模型应用生态与命令生成，Axvisor 负责命令接收、实时任务调度和板级控制</text>
+
+  <rect class="starry" x="60" y="120" width="430" height="610"/>
+  <text class="h" x="275" y="155" text-anchor="middle">StarryOS / SenseVoice RKNN</text>
+  <rect class="box" x="95" y="190" width="360" height="74"/>
+  <text class="label" x="275" y="219" text-anchor="middle">prebuild.sh / rootfs overlay</text>
+  <text class="body" x="275" y="243" text-anchor="middle">runtime、模型、tokens、wav 样例进入 guest rootfs</text>
+  <rect class="box" x="95" y="292" width="360" height="88"/>
+  <text class="label" x="275" y="322" text-anchor="middle">sensevoice_rknn_npu.py</text>
+  <text class="body" x="275" y="347" text-anchor="middle">wav 读取 · fbank80 · LFR · CMVN</text>
+  <text class="small" x="275" y="367" text-anchor="middle">ctypes 调 librknnrt C API</text>
+  <rect class="box" x="95" y="408" width="360" height="88"/>
+  <text class="label" x="275" y="438" text-anchor="middle">RK3588 NPU /dev/dri/card1</text>
+  <text class="body" x="275" y="463" text-anchor="middle">rknn_init · rknn_run · output query</text>
+  <text class="small" x="275" y="483" text-anchor="middle">tensor attr / fixed shape / output reshape</text>
+  <rect class="box" x="95" y="524" width="360" height="84"/>
+  <text class="label" x="275" y="553" text-anchor="middle">CTC decode + command map</text>
+  <text class="body" x="275" y="578" text-anchor="middle">中文短语 -> forward/back/left/right/stop</text>
+  <rect class="box" x="125" y="635" width="300" height="55"/>
+  <text class="label" x="275" y="668" text-anchor="middle">console 输出 @@RT token</text>
+
+  <rect class="ax" x="555" y="210" width="330" height="370"/>
+  <text class="h" x="720" y="245" text-anchor="middle">Axvisor 命令通道</text>
+  <rect class="box" x="590" y="285" width="260" height="72"/>
+  <text class="label" x="720" y="315" text-anchor="middle">wheel/console.rs</text>
+  <text class="body" x="720" y="339" text-anchor="middle">监听 guest console，匹配 @@RT</text>
+  <rect class="box" x="590" y="385" width="260" height="72"/>
+  <text class="label" x="720" y="415" text-anchor="middle">wheel/command.rs</text>
+  <text class="body" x="720" y="439" text-anchor="middle">token 编码为 mailbox 命令</text>
+  <rect class="box" x="590" y="485" width="260" height="56"/>
+  <text class="label" x="720" y="520" text-anchor="middle">watchdog / fallback stop</text>
+
+  <rect class="rt" x="950" y="120" width="430" height="610"/>
+  <text class="h" x="1165" y="155" text-anchor="middle">Axvisor RT / Wheel Control</text>
+  <rect class="box" x="985" y="190" width="360" height="72"/>
+  <text class="label" x="1165" y="220" text-anchor="middle">RT mailbox consumer</text>
+  <text class="body" x="1165" y="244" text-anchor="middle">每周期拉取最新命令，生成 BalanceTarget</text>
+  <rect class="box" x="985" y="292" width="360" height="84"/>
+  <text class="label" x="1165" y="322" text-anchor="middle">hardware.rs</text>
+  <text class="body" x="1165" y="347" text-anchor="middle">I2C5 读取 IMU，UART3/6/7 控制电机与舵机</text>
+  <rect class="box" x="985" y="406" width="360" height="84"/>
+  <text class="label" x="1165" y="436" text-anchor="middle">ekf.rs / model.rs</text>
+  <text class="body" x="1165" y="461" text-anchor="middle">状态估计、动力学模型、腿部高度参数</text>
+  <rect class="box" x="985" y="520" width="360" height="84"/>
+  <text class="label" x="1165" y="550" text-anchor="middle">controller.rs / control.rs</text>
+  <text class="body" x="1165" y="575" text-anchor="middle">LQR 扭矩计算、限幅、deadline miss 记录</text>
+  <rect class="box" x="1015" y="635" width="300" height="55"/>
+  <text class="label" x="1165" y="668" text-anchor="middle">双轮足机器人动作</text>
+
+  <path class="line" d="M425 662 L590 321"/>
+  <path class="line" d="M850 421 L985 226"/>
+  <path class="dash" d="M985 665 C820 800, 440 800, 275 690"/>
+  <text class="small" x="720" y="790" text-anchor="middle">证据闭环：识别结果、命令 token、RT 周期耗时、deadline miss、串口日志、演示视频</text>
+</svg>

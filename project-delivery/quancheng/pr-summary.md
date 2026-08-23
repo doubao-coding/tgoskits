@@ -37,7 +37,7 @@
 
 ## 4. 任务三：AI 联动应用 PR
 
-任务三相关 PR/提交主要体现 AI 与控制联动的应用闭环。除已明确编号的 PR 外，`xiaohui` 在 `origin/xiaohui/sensevoice` 上已经提交过 SenseVoice QEMU 应用、Axvisor+StarryOS 端到端用例、OrangePi 5 Plus RK3588 NPU 板级适配、启动注入和下载稳定性修复；这些内容先以 commit 形式记录，后续如有 PR 编号再补齐。
+任务三相关 PR/提交主要体现 AI 与控制联动的应用闭环。除已明确编号的 PR 外，`xiaohui` 在 `origin/xiaohui/sensevoice` 上已经提交过 SenseVoice QEMU 应用、Axvisor+StarryOS 端到端用例、OrangePi 5 Plus RK3588 NPU 板级适配、启动注入和下载稳定性修复；未编号内容以 commit 形式记录。
 
 | PR/提交 | 标题 | 主要修改内容 | 涉及目录 | 测试或验证方式 | 状态 |
 | --- | --- | --- | --- | --- | --- |
@@ -49,21 +49,3 @@
 | [`58cb3b197`](https://github.com/rcore-os/tgoskits/commit/58cb3b197eaf3f9eb00977939fbb05d39ad35acf) | `fix(axvisor): automate starry guest kernel load and fail fast on hung guests` | 应用启动优化：Axvisor QEMU Starry guest 改为构建期嵌入 kernel，健康启动失败时快速失败，避免手工注入和长时间挂起 | `os/axvisor/configs/vms/qemu/aarch64/`、`test-suit/axvisor/normal/qemu-starry/` | smoke PASS，sensevoice PASS，并对 EL2 异常循环设置失败判定 | 已提交到 `origin/xiaohui/sensevoice` |
 | [`2b92958ff`](https://github.com/rcore-os/tgoskits/commit/2b92958ff8254381eca63a6ab692ef18ed58cd18) | `fix(axbuild): inject overlay via cd+basename to debugfs-resolvable paths` | 应用启动优化：修复 rootfs overlay 注入路径，避免 debugfs 将绝对路径写成不可解析文件名；放宽不可复现 glibc arm64 SHA gate | `scripts/axbuild/src/rootfs/inject.rs`、`apps/starry/sensevoice/prebuild.sh` | `cargo xtask starry app qemu -t sensevoice --arch aarch64` 到达 `SENSEVOICE_TEST_PASSED` | 已提交到 `origin/xiaohui/sensevoice` |
 | [`e325b5aa2`](https://github.com/rcore-os/tgoskits/commit/e325b5aa2e7234088135b85cc039b572c88883f5) / [`b0022043f`](https://github.com/rcore-os/tgoskits/commit/b0022043f5ec18e3de6c8616c42d1c31e27ef19a) | SenseVoice 资产下载稳定性修复 | 应用启动优化：为模型、runtime、样例音频下载增加 mirror fallback、断点续传和指数退避重试，降低复现环境网络波动影响 | `apps/starry/sensevoice/prebuild.sh` | 受限网络和 transient TLS EOF 场景下 prebuild 可恢复 | 已提交到 `origin/xiaohui/sensevoice` |
-
-## 5. 测试验收与文档 PR
-
-除功能实现 PR 外，项目还需要整理测试验收和文档交付类 PR，用于证明方案可复现、可检查、可评审。
-
-| PR 编号/链接 | PR 标题 | 类型 | 主要内容 | 对应材料 |
-| --- | --- | --- | --- | --- |
-| 待补 | 待补 | 测试验收 | 启动、隔离、通信、AI 闭环和端到端时延测试 | `test-plan.md` |
-| 待补 | 待补 | 文档交付 | 技术方案、测试文档、PR 清单和复现说明 | `project-delivery/quancheng/` |
-
-## 6. 待补材料
-
-正式提交前需要补齐以下内容：
-
-- 每个参赛 PR 的编号、链接、标题和合并状态。
-- 每个 PR 的主要修改内容和涉及目录。
-- 每个 PR 对应的测试命令或验证记录。
-- 任务三端到端演示日志、截图、视频或时延统计表。

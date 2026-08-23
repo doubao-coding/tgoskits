@@ -571,7 +571,11 @@ control_voice.wav
   -> 双轮足机器人动作
 ```
 
-这条架构把任务三的工作边界拆清楚：StarryOS 负责“模型能跑、跑得快、应用能启动”；Axvisor 实时侧负责“命令能被实时任务接收、控制周期稳定、动作可验证”。后续如果将 console 原型替换为任务二的结构化 GIPC CONTROL 消息，模型生态、性能优化和实时控制闭环都可以保持不变。
+这条架构把任务三的工作边界拆清楚：StarryOS 负责“模型能跑、跑得快、应用能启动”；Axvisor 实时侧负责“命令能被实时任务接收、控制周期稳定、动作可验证”。console 原型与任务二的结构化 GIPC CONTROL 消息共享同一类控制语义，模型生态、性能优化和实时控制闭环保持解耦。
+
+代码模块关系如下：
+
+![任务三代码模块架构](assets/task3-code-architecture.svg)
 
 ### 5.3 模型应用生态适配
 
@@ -586,6 +590,17 @@ Axvisor (EL2, SD 卡加载 guest)
 ```
 
 适配工作包括输入音频格式、特征前处理、NPU runtime 调用和后处理命令映射四个层面。`sensevoice_rknn_npu.py` 以 16 kHz 单声道 wav 为输入，完成 fbank80、LFR、CMVN 等前处理后调用 RKNN runtime，在 RK3588 NPU 上执行 SenseVoice encoder，并将中文短语映射到有限控制命令集合。固定命令集合包括前进、后退、左转、右转和停止，避免智能侧直接注入任意速度、偏航角速度或电机电流。
+
+StarryOS 侧应用代码可以按以下职责拆分理解：
+
+| 模块或阶段 | 关键职责 | 设计要点 |
+| --- | --- | --- |
+| rootfs 预构建 | 准备 Python、numpy、librknnrt、模型、tokens、样例 wav | 模型和 runtime 进入 guest rootfs，避免演示时依赖外部网络 |
+| 音频前处理 | wav 读取、fbank80、LFR、CMVN | 与上游 SenseVoice/RKNN 实现做数值对齐，降低模型输入偏差 |
+| RKNN 调用 | `rknn_init`、tensor attr 查询、输入设置、`rknn_run`、输出读取 | 适配 librknnrt 2.x 结构体布局、fixed-shape 输出和 StarryOS rknpu 行为 |
+| CTC 解码 | 根据 tokens 表做 greedy decode | 把模型输出还原为中文短语，验证语义与原生 Linux 一致 |
+| 命令映射 | 中文短语映射为 `forward/back/left/right/stop` | 限定动作集合，避免智能侧直接控制连续速度或电机量 |
+| console 标记 | 输出 `@@RT <token>` | 与普通串口日志共存，Axvisor 只消费受控前缀 |
 
 正确性方法是把推理路径与社区上游运行时（happyme531/SenseVoiceSmall-RKNN2 及模型作者的 rkvoice-stream）逐项对齐：tensor 查询枚举、输入构造（4 个提示帧 + LFR 语音帧）、kaldi 兼容 fbank 前端、CMVN 符号、输出布局与 CTC 解码；前端在宿主机用 kaldi-native-fbank 数值对拍（fbank 偏差 ≤ 3e-4，LFR+CMVN 后 ≤ 4e-5）。板上 zh/en 参考 wav 转写通过（fp16 精度边缘，漏 1-2 字），推理语义与原生 Linux 一致。
 
@@ -607,9 +622,19 @@ Axvisor (EL2, SD 卡加载 guest)
 | guest vCPU 绑定大核 | guest 运行在 A55 小核（实发约 1175 MHz） | Info 档：模型加载 41.2s→27.1s，推理 2.96s→2.60s |
 | 板级日志降噪 | 每 ioctl 的 info 行 + submit 结构体 dump 约 100KB/轮串口流量 | Error 档：推理 2.60s→1.72s，rknn_init 1.22s→0.66s，加载 26.30s（冷读 25.41s，19.2 MB/s） |
 | 调频 governor 拓扑归因修复 | SMP=1 guest 的 busy 恒记到 A55 簇，实际运行的大核被降到 408 MHz | Error 档＋动态调频：推理 1.72s→1.46s，rknn_init 0.66s→0.50s；冷读 29.82s（16.4 MB/s，突发 I/O 间隙降档所致） |
-| readahead 窗口 1 MiB | 32 页窗口下 490 MB 模型读发起约 3800 个请求，间隙损失 22% 总线带宽 | 请求与 IDMAC 链上限对齐（板测进行中） |
+| readahead 窗口 1 MiB | 32 页窗口下 490 MB 模型读发起约 3800 个请求，间隙损失 22% 总线带宽 | 请求与 IDMAC 链上限对齐，作为模型冷读优化项记录 |
 
-收敛后 NPU 提交路径达原生水平（7.78 ms/次 vs 原生约 7.5 ms）；剩余模型加载差距由 SD HighSpeed 总线上限决定（冷读实测 16.4～19.2 MB/s，为 24.75 MB/s 总线极限的 66%～78%），后续方向为 UHS-I（SDR104/DDR50）使能，前置的 1.8 V 电压轨与协议状态机工作已在内部分支完成。
+性能优化过程按“定位瓶颈 -> 缩小影响路径 -> 记录可复核数据”的方式组织：
+
+| 问题定位 | 代码改动 | 影响路径 | 验证数据 |
+| --- | --- | --- | --- |
+| guest 运行在 A55 小核，NPU submit 之外的 Python/CTC 路径慢 | VM 配置绑定 A76 大核 | CPU 前后处理、runtime 初始化、CTC 解码 | 推理 2.96s 降至 2.60s |
+| 串口 info 日志和 submit dump 干扰每轮 ioctl | 降低板级日志默认档位，保留聚合 `[perf]` | NPU ioctl 提交、串口输出、调度扰动 | 推理 2.60s 降至 1.72s |
+| governor 将 SMP=1 guest busy 归因到 A55 簇 | 按 FDT `/cpus` SCMI clock id 归因 | CPU 频率选择、动态调频稳定性 | 动态调频组推理 1.46s |
+| 模型冷读请求碎片化，SD 总线利用率低 | readahead 窗口扩大到 1 MiB | rootfs 文件缓存、SD 冷读、模型加载 | 作为冷读路径优化边界记录 |
+| NPU 是否仍是瓶颈不清晰 | card1 ioctl 聚合计时 | submit/ioctl 与模型整体耗时拆分 | NPU submit 7.78ms/次，接近原生约 7.5ms |
+
+收敛后 NPU 提交路径达原生水平（7.78 ms/次 vs 原生约 7.5 ms）；剩余模型加载差距由 SD HighSpeed 总线上限决定（冷读实测 16.4～19.2 MB/s，为 24.75 MB/s 总线极限的 66%～78%）。UHS-I（SDR104/DDR50）使能依赖 1.8 V 电压轨与协议状态机能力，可作为模型冷读瓶颈的扩展优化边界。
 
 优化前后与原生 Linux 的对比图如下，三配置串口原始数据见 `test-plan.md` §5.3：
 
@@ -621,13 +646,27 @@ Axvisor (EL2, SD 卡加载 guest)
 | --- | --- | --- |
 | [#2166](https://github.com/rcore-os/tgoskits/pull/2166) | RK3588 guest 性能收敛 | 覆盖 guest A76 绑核、日志降噪、card1 ioctl 聚合计时、readahead 扩大等性能优化，形成 `sensevoice-perf.svg` 和 `test-plan.md` 中的实测数据 |
 | [#2165](https://github.com/rcore-os/tgoskits/pull/2165) | RK3588 governor 拓扑归因修复 | 修复 SMP=1 guest busy 归因到错误 CPU 簇的问题，使实际运行大核不再被错误降频，是动态调频组推理 1.46s 的前置优化 |
-| [`54ad820b3`](https://github.com/rcore-os/tgoskits/commit/54ad820b3f5484d8f4f46586c6136f9c9c5ed06c) | 板级 NPU 执行路径 | 在 OrangePi 5 Plus 上跑到 `rknn_init/run/outputs`，为后续性能计时和差距定位提供实际板级路径 |
+| [`54ad820b3`](https://github.com/rcore-os/tgoskits/commit/54ad820b3f5484d8f4f46586c6136f9c9c5ed06c) | 板级 NPU 执行路径 | 在 OrangePi 5 Plus 上跑到 `rknn_init/run/outputs`，为性能计时和差距定位提供实际板级路径 |
 
 ### 5.5 应用启动优化
 
 应用启动优化关注从 Axvisor 上电启动到 StarryOS 语音识别应用可执行的整段路径。任务三不是只看推理函数耗时，还要看开发板上是否能稳定加载 guest、挂载 rootfs、找到模型文件、初始化 RKNN runtime，并在演示输入到达前完成准备。
 
 当前启动路径中，Axvisor 从 SD 卡加载 StarryOS guest，guest 内部启动语音识别应用并读取模型文件。模型加载时间受 rootfs、SD 冷读、文件缓存和 runtime 初始化共同影响，因此文档中把模型加载、`rknn_init` 和单条推理分开记录。启动串口截图 [minicom_output.jpg](assets/minicom_output.jpg) 用于证明系统已经进入板级运行环境，演示视频 [video.mp4](assets/video.mp4) 用于证明语音命令能够驱动机器人动作。
+
+启动路径按以下链路拆分：
+
+```text
+Axvisor board config
+  -> StarryOS guest kernel / VM config
+  -> rootfs overlay 注入 SenseVoice runtime、模型和样例
+  -> guest 启动并进入 autostart
+  -> 初始化 Python/RKNN runtime
+  -> 冷读模型并完成 rknn_init
+  -> 等待或执行 control_voice.wav
+```
+
+应用启动优化的价值在于减少人工步骤和不可复现因素。guest kernel 构建期嵌入减少了手工 debugfs 注入；overlay 注入修复保证模型资产在 guest 内可见；下载 fallback 和断点续传降低了模型、runtime、样例音频准备阶段对单一网络源的依赖。
 
 关联 PR/提交如下：
 
@@ -651,6 +690,17 @@ Axvisor (EL2, SD 卡加载 guest)
 | RT mailbox | `os/axvisor/src/wheel/command.rs` | 把命令编码为单字节消息，发送到实时控制侧 |
 | 控制执行 | `os/axvisor/src/wheel/hardware.rs` | 在 RT 任务中读取 IMU/电机状态，计算扭矩并写入 UART 电机协议 |
 | 控制算法 | `os/axvisor/src/wheel/controller.rs`、`control.rs`、`ekf.rs`、`model.rs` | 组织 EKF 状态估计、动力学预测、LQR 扭矩控制和舵机腿部几何 |
+
+Axvisor 实时侧代码按“命令接收、目标更新、硬件访问、控制计算、输出保护”分层，避免把 AI 推理或复杂字符串处理带入 8ms 周期：
+
+| 层次 | 代码锚点 | 实时性设计 |
+| --- | --- | --- |
+| 命令接收 | `wheel/console.rs` | 只在 guest console mux 处识别 `@@RT` 前缀，不阻塞实时控制循环 |
+| 命令缓存 | `wheel/command.rs` | mailbox 保存最新有限 token，实时侧周期性拉取 |
+| 目标生成 | `BalanceTarget` / 控制目标映射 | 将离散命令转为限幅速度和偏航角速度 |
+| 硬件访问 | `wheel/hardware.rs` | I2C/UART 访问集中封装，便于统计单周期外设耗时 |
+| 控制算法 | `ekf.rs`、`model.rs`、`controller.rs`、`control.rs` | EKF/LQR 保持确定性计算，不依赖智能侧执行进度 |
+| 安全降级 | command watchdog / torque limit / deadline miss | 命令超时回到 `stop`，输出限幅并记录周期异常 |
 
 实物链路使用 console 标记作为概念验证通道：StarryOS 内的 Python 程序在识别到语音后输出 `@@RT forward` 等行，Axvisor 在 guest console mux 处观察输出并转发给实时侧。该方式避免在演示阶段额外引入 virtio 控制通道，便于快速验证“AI 推理结果进入实时控制闭环”。正式工程化时，仍可复用任务二的 GIPC/IP 协议，把 `@@RT` 命令替换为结构化 CONTROL 消息。
 
@@ -701,6 +751,8 @@ Axvisor (EL2, SD 卡加载 guest)
 
 实时控制任务以 8ms 为基础周期，对应 `ESP32_CONTROL_PERIOD_NANOS = 8_000_000`。每个周期内执行以下步骤：
 
+![Axvisor RT 侧 8ms 双轮足控制循环](assets/task3-rt-loop.svg)
+
 1. 从 RT mailbox 拉取最新语音命令，并转换为 `BalanceTarget`。
 2. 通过 I2C5 读取 MPU6050 加速度计和陀螺仪数据。
 3. 使用上一周期电机命令和当前 IMU/电机速度反馈运行 EKF，估计 `theta`、`theta_dot`、`velocity`、`yaw_rate`。
@@ -739,20 +791,9 @@ Axvisor (EL2, SD 卡加载 guest)
 
 双轮足机器人把这种关系具体化：StarryOS 侧的 SenseVoice/RKNN 推理证明智能侧能力；Axvisor/RT 侧的 8ms 平衡控制证明控制侧实时能力；console/RT mailbox 原型和任务二 GIPC/IP 方案共同说明控制语义可以从智能侧进入控制侧。最终演示视频、语音样例和串口启动截图应作为任务三的交付证据归档，而任务一、任务二的 PR 和测试记录用于解释该演示为什么能够稳定复现。
 
-## 6. 设计实现说明
+## 6. 复现与部署说明
 
-### 6.1 源码组织
-
-本项目依托 TGOSKits 统一仓库组织代码和测试。比赛相关实现按系统层、通信层和应用层划分：
-
-- 虚拟化底座能力：`os/axvisor/`、`components/axvm`、`components/axvcpu`、`components/axdevice`、`components/axaddrspace` 及架构相关虚拟中断组件。
-- 客户机通信能力：客户机应用、网络示例、测试用例或协议库目录。
-- AI 联动应用：AI 示例、测试 case 或板级演示目录。
-- 交付文档：`project-delivery/quancheng/`。
-
-## 7. 复现与部署说明
-
-### 7.1 构建环境
+### 6.1 构建环境
 
 基础环境参考仓库 `README_CN.md` 和快速上手文档。基础验证入口包括：
 
@@ -762,7 +803,7 @@ cargo xtask starry qemu --arch aarch64
 cargo xtask axvisor test qemu --target aarch64
 ```
 
-### 7.2 Axvisor QEMU 验证路径
+### 6.2 Axvisor QEMU 验证路径
 
 Axvisor 场景使用仓库已有测试入口进行基础验证：
 
@@ -773,7 +814,7 @@ cargo xtask axvisor test qemu --target x86_64
 
 手工启动指定 VM 配置时，Axvisor 开发指南中的 Guest 镜像、rootfs 和 `cargo axvisor qemu` 流程作为运行路径。
 
-### 7.3 StarryOS 与客户机能力验证
+### 6.3 StarryOS 与客户机能力验证
 
 StarryOS 可用于智能侧客户机能力验证，尤其是 Linux 兼容、网络、脚本和压力负载场景：
 
@@ -782,10 +823,10 @@ cargo xtask starry test qemu --target aarch64
 cargo xtask starry test qemu --target aarch64 --stress
 ```
 
-## 8. 测试验收关系
+## 7. 测试验收关系
 
 测试验收按三任务递进组织：先验收底座，再验收链路，最后验收应用闭环。详细测试项见 [test-plan.md](test-plan.md)。
 
-## 9. 结语
+## 8. 结语
 
 本方案将“Axvisor 实时性与隔离”“控制通信”“AI 联动应用”统一到同一条技术链路中。任务一解决 Axvisor 在 AMP 混合系统中能否稳定运行，任务二解决智能侧与实时侧之间能否可靠交换控制语义，任务三证明前两项能力能够支撑实际 AI 控制闭环。该组织方式既保留每项任务的独立验收证据，也能体现项目整体技术价值。
