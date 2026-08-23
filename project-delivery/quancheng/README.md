@@ -4,7 +4,7 @@
 
 - 任务一：Axvisor 实时性与隔离底座，优化 Axvisor 自身的实时运行能力，为智能侧 guest 与预留实时 CPU 上的控制任务提供隔离保障。
 - 任务二：客户机通信底座，在隔离客户机之间建立可复现、可测试的 IP 通信和应用层协议链路。
-- 任务三：AI 联动应用，在前两项基础上完成智能侧推理、控制侧执行和状态回传的闭环展示。
+- 任务三：AI 联动应用，在前两项基础上完成 StarryOS 智能侧推理、Axvisor 实时侧控制和状态回传的闭环展示。
 
 ## 材料清单
 
@@ -13,6 +13,7 @@
 | [technical-solution.md](technical-solution.md) | 设计方案正文，说明总体架构、三任务设计和部署复现关系。 |
 | [test-plan.md](test-plan.md) | 测试验收框架，覆盖启动、隔离、通信、性能、AI 联动和综合指标记录。 |
 | [pr-summary.md](pr-summary.md) | 参赛 PR 清单，用于整理各 PR 与三项任务之间的对应关系。 |
+| [assets/task3-ai-control.svg](assets/task3-ai-control.svg) | 任务三 AI 语音识别到 Axvisor 实时控制闭环架构图。 |
 | [assets/control_voice.wav](assets/control_voice.wav) | 双轮足机器人语音控制输入样例，用于任务三 AI 联动演示。 |
 | [assets/video.mp4](assets/video.mp4) | 双轮足机器人端到端实物演示视频。 |
 | [assets/minicom_output.jpg](assets/minicom_output.jpg) | 开发板启动 Axvisor/客户机/实时任务的串口输出截图。 |
@@ -35,5 +36,5 @@ TGOSKits 仓库提供 ArceOS、StarryOS、Axvisor 及相关组件的统一开发
 - `test-suit/axvisor/`：Axvisor QEMU、U-Boot 与板级测试入口。
 - `test-suit/starryos/`：StarryOS 普通测试和压力测试入口，可支撑客户机能力、网络和负载场景验证。
 - `drivers/npu/`、`test-suit/starryos/normal/board-orangepi-5-plus/npu-yolov8/`：AI 推理与板级 NPU 验证相关目录，是任务三应用展示的重要参考。
-- `apps/starry/sensevoice-rknn/`（板级应用分支）：SenseVoice 语音识别在 axvisor+starry guest + RK3588 NPU 上的部署与调优材料；相关通用修复与性能 PR 见 [#2163](https://github.com/rcore-os/tgoskits/pull/2163)、[#2164](https://github.com/rcore-os/tgoskits/pull/2164)、[#2165](https://github.com/rcore-os/tgoskits/pull/2165)、[#2166](https://github.com/rcore-os/tgoskits/pull/2166)。
+- `apps/starry/sensevoice-rknn/`（板级应用分支）：SenseVoice 语音识别在 axvisor+starry guest + RK3588 NPU 上的部署与调优材料；任务三相关 PR 编号后续在 `pr-summary.md` 中补齐。
 - `rt-robot` 分支中的 `os/axvisor/src/wheel/`、`sensevoice_rknn_npu.py` 和 `orangepi-5-plus-rt-sd-wheel`：双轮足机器人实物演示原型，包含 SenseVoice 语音命令、RT mailbox 转发、8ms 轮足平衡闭环和板级外设控制。

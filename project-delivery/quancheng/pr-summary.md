@@ -37,11 +37,13 @@
 
 ## 4. 任务三：AI 联动应用 PR
 
-任务三相关 PR 主要体现 AI 与控制联动的应用闭环，包括模型推理、推理结果到控制动作的转换、控制指令下发、控制侧执行、状态回传和端到端时延统计。
+任务三相关 PR 主要体现 AI 与控制联动的应用闭环。当前先按工作内容预留 PR 位置，后续再补具体 PR 编号、标题和合入状态。
 
 | PR 编号/链接 | PR 标题 | 主要修改内容 | 涉及目录 | 测试或验证方式 | 状态 |
 | --- | --- | --- | --- | --- | --- |
-| [#2166](https://github.com/rcore-os/tgoskits/pull/2166) | `perf(rk3588): close the guest performance gap on OrangePi 5 Plus` | AI 推理负载性能收敛四件套：guest vCPU 绑定大核 A76（0x00→0x400）、板级日志降噪至 Warn、card1 ioctl 聚合计时仪表、缓存文件 readahead 窗口扩至 1 MiB（与 dwmmc IDMAC 链上限对齐） | `os/axvisor/configs/vms/`、`os/StarryOS/kernel/src/pseudofs/dev/`、`fs/ax-fs-ng/src/file/cache/` | ax-driver/ax-fs-ng clippy、板级构建；板上实测（Error 档）：本 PR 单独推理 2.96s→1.72s、加载 41.2s→26.3s（静态 1200 MHz）；叠加 #2165 动态调频后推理 1.46s、加载 30.62s；NPU submit 7.78ms/次达原生水平（原生约 7.5ms） | 已提交到 `dev` |
+| 待补 | 待补 | 模型应用生态适配：StarryOS 侧适配 SenseVoice/RKNN runtime、音频前处理、CTC 解码和控制命令映射 | 待补 | 样例 wav 推理、转写结果、命令 token 输出 | 待补 |
+| 待补 | 待补 | 模型性能优化：guest 绑核、日志降噪、NPU ioctl 计时、readahead、调频归因等性能收敛工作 | 待补 | 板级 `[perf]` 日志、`sensevoice-perf.svg`、`test-plan.md` 性能表 | 待补 |
+| 待补 | 待补 | 应用启动优化：Axvisor 启动、StarryOS guest autostart、rootfs/模型加载路径和样例输入准备 | 待补 | 启动串口日志、`minicom_output.jpg`、模型加载耗时 | 待补 |
 
 ## 5. 测试验收与文档 PR
 

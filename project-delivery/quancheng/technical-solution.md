@@ -519,11 +519,21 @@ GIPC_AGGREGATE requests=<N> success=<S> success_rate=<ratio> app_errors=<E> time
 
 ## 5. 任务三：AI 联动控制应用设计
 
+![任务三 AI 语音识别与实时控制闭环架构](assets/task3-ai-control.svg)
+
 ### 5.1 任务目标
 
-任务三目标是在任务一和任务二基础上构建完整应用闭环，证明 AI 推理结果能够驱动控制侧动作，并通过状态回传完成验证。该任务是前两项基础能力的应用展示，不应脱离虚拟化底座和客户机通信单独描述。
+任务三目标是在任务一和任务二基础上构建完整应用闭环，证明 StarryOS 智能侧完成 RK3588 语音识别后，能够把识别结果转换为受限控制指令，并通过 Axvisor 实时侧任务驱动双轮足机器人动作。该任务不是单纯跑通一个模型，而是把模型应用生态、推理性能、应用启动和实时控制闭环放在同一条链路中验证。
 
-本项目的实物演示场景为双轮足机器人：智能侧 StarryOS 运行语音识别程序，控制侧实时任务执行轮足平衡与电机控制。交付目录中的三份素材用于支撑该场景的展示证据：
+任务三的工作内容分为三条主线：
+
+| 工作方向 | 目标 | 关键内容 | 输出证据 |
+| --- | --- | --- | --- |
+| 模型应用生态适配 | 让 StarryOS 智能侧具备运行 RK3588 语音识别模型的应用环境 | SenseVoice/RKNN runtime 接入，fbank、LFR、CMVN、CTC 解码链路对齐，样例 wav 输入和命令词映射 | `control_voice.wav`、推理日志、转写结果 |
+| 模型性能优化 | 缩小 StarryOS guest 与原生 Linux 的推理和 NPU 提交差距 | guest vCPU 绑定 A76 大核、板级日志降噪、card1 ioctl 聚合计时、readahead 窗口扩大、RK3588 governor 归因修复 | `sensevoice-perf.svg`、串口 `[perf]` 日志、`test-plan.md` 性能表 |
+| 应用启动优化 | 缩短从 Axvisor 启动、guest 加载到语音应用可执行的等待时间 | SD/rootfs/模型加载路径梳理，guest autostart，样例输入放置，模型冷读瓶颈定位 | `minicom_output.jpg`、启动串口日志、模型加载计时 |
+
+本项目的实物演示场景为双轮足机器人：右侧 StarryOS 智能侧适配 RK3588 的语音识别模型应用生态，识别成功后将中文语音转换为 `forward`、`back`、`left`、`right`、`stop` 等有限指令；指令再进入 Axvisor 预留 CPU 上的实时任务，由实时控制闭环执行轮足平衡与电机控制。交付目录中的三份素材用于支撑该场景的展示证据：
 
 | 素材 | 文件 | 证明内容 |
 | --- | --- | --- |
@@ -531,7 +541,64 @@ GIPC_AGGREGATE requests=<N> success=<S> success_rate=<ratio> app_errors=<E> time
 | 演示视频 | [video.mp4](assets/video.mp4) | 系统部署到双轮足机器人后的端到端动作展示 |
 | 启动串口截图 | [minicom_output.jpg](assets/minicom_output.jpg) | 开发板启动 Axvisor/客户机/实时任务时的串口输出证据 |
 
-### 5.2 双轮足机器人实物闭环
+### 5.2 任务三技术架构
+
+任务三采用“StarryOS 智能侧 + Axvisor 实时侧”的 AMP 应用架构。StarryOS 侧负责模型应用生态和语音识别，Axvisor 侧负责接收受控命令并在预留实时 CPU 上执行 8ms 控制任务。两侧之间不传递任意脚本或不受限控制量，而是传递有限命令 token，降低智能侧误识别、卡死或应用异常对实时侧的影响。
+
+```text
+control_voice.wav
+  -> StarryOS SenseVoice RKNN 推理
+  -> 中文短语识别与命令词映射
+  -> @@RT command console marker
+  -> Axvisor guest console observer
+  -> RT mailbox command
+  -> 8ms wheel balance loop
+  -> IMU + motors
+  -> 双轮足机器人动作
+```
+
+这条架构把任务三的工作边界拆清楚：StarryOS 负责“模型能跑、跑得快、应用能启动”；Axvisor 实时侧负责“命令能被实时任务接收、控制周期稳定、动作可验证”。后续如果将 console 原型替换为任务二的结构化 GIPC CONTROL 消息，模型生态、性能优化和实时控制闭环都可以保持不变。
+
+### 5.3 模型应用生态适配
+
+模型应用生态适配的核心是让 StarryOS guest 具备承载 RK3588 语音识别应用的必要运行环境，而不是只在宿主 Linux 上证明模型可用。本项目在开发板阶段选型 **SenseVoice 语音识别**作为智能侧模型，落地链路为：
+
+```text
+Axvisor (EL2, SD 卡加载 guest)
+  -> StarryOS guest (passthrough, vCPU 绑定 A76 大核)
+     -> /dev/dri/card1 (rknpu DRM 重实现)
+        -> librknnrt (C API) -> RK3588 NPU (fp16-scaled 模型)
+           -> CPU 侧 CTC 解码
+```
+
+适配工作包括输入音频格式、特征前处理、NPU runtime 调用和后处理命令映射四个层面。`sensevoice_rknn_npu.py` 以 16 kHz 单声道 wav 为输入，完成 fbank80、LFR、CMVN 等前处理后调用 RKNN runtime，在 RK3588 NPU 上执行 SenseVoice encoder，并将中文短语映射到有限控制命令集合。固定命令集合包括前进、后退、左转、右转和停止，避免智能侧直接注入任意速度、偏航角速度或电机电流。
+
+正确性方法是把推理路径与社区上游运行时（happyme531/SenseVoiceSmall-RKNN2 及模型作者的 rkvoice-stream）逐项对齐：tensor 查询枚举、输入构造（4 个提示帧 + LFR 语音帧）、kaldi 兼容 fbank 前端、CMVN 符号、输出布局与 CTC 解码；前端在宿主机用 kaldi-native-fbank 数值对拍（fbank 偏差 ≤ 3e-4，LFR+CMVN 后 ≤ 4e-5）。板上 zh/en 参考 wav 转写通过（fp16 精度边缘，漏 1-2 字），推理语义与原生 Linux 一致。
+
+### 5.4 模型性能优化
+
+智能侧推理最初与原生 Linux 差距明显（单条推理 2.96s vs 1.04s，模型加载 41.2s vs 0.65s）。通过在 card1 ioctl 层增加聚合计时仪表，逐项定位并收敛：
+
+| 优化项 | 问题 | 实测效果（板级，标注日志档与调频状态） |
+| --- | --- | --- |
+| guest vCPU 绑定大核 | guest 运行在 A55 小核（实发约 1175 MHz） | Info 档：模型加载 41.2s→27.1s，推理 2.96s→2.60s |
+| 板级日志降噪 | 每 ioctl 的 info 行 + submit 结构体 dump 约 100KB/轮串口流量 | Error 档：推理 2.60s→1.72s，rknn_init 1.22s→0.66s，加载 26.30s（冷读 25.41s，19.2 MB/s） |
+| 调频 governor 拓扑归因修复 | SMP=1 guest 的 busy 恒记到 A55 簇，实际运行的大核被降到 408 MHz | Error 档＋动态调频：推理 1.72s→1.46s，rknn_init 0.66s→0.50s；冷读 29.82s（16.4 MB/s，突发 I/O 间隙降档所致） |
+| readahead 窗口 1 MiB | 32 页窗口下 490 MB 模型读发起约 3800 个请求，间隙损失 22% 总线带宽 | 请求与 IDMAC 链上限对齐（板测进行中） |
+
+收敛后 NPU 提交路径达原生水平（7.78 ms/次 vs 原生约 7.5 ms）；剩余模型加载差距由 SD HighSpeed 总线上限决定（冷读实测 16.4～19.2 MB/s，为 24.75 MB/s 总线极限的 66%～78%），后续方向为 UHS-I（SDR104/DDR50）使能，前置的 1.8 V 电压轨与协议状态机工作已在内部分支完成。
+
+优化前后与原生 Linux 的对比图如下，三配置串口原始数据见 `test-plan.md` §5.3：
+
+![SenseVoice 推理与模型加载性能对比](assets/sensevoice-perf.svg)
+
+### 5.5 应用启动优化
+
+应用启动优化关注从 Axvisor 上电启动到 StarryOS 语音识别应用可执行的整段路径。任务三不是只看推理函数耗时，还要看开发板上是否能稳定加载 guest、挂载 rootfs、找到模型文件、初始化 RKNN runtime，并在演示输入到达前完成准备。
+
+当前启动路径中，Axvisor 从 SD 卡加载 StarryOS guest，guest 内部启动语音识别应用并读取模型文件。模型加载时间受 rootfs、SD 冷读、文件缓存和 runtime 初始化共同影响，因此文档中把模型加载、`rknn_init` 和单条推理分开记录。启动串口截图 [minicom_output.jpg](assets/minicom_output.jpg) 用于证明系统已经进入板级运行环境，演示视频 [video.mp4](assets/video.mp4) 用于证明语音命令能够驱动机器人动作。
+
+### 5.6 双轮足机器人实物闭环
 
 双轮足机器人同时具备倒立摆平衡、差速转向和腿部高度调节特征。与只控制轮式小车不同，轮足平台需要持续估计机体倾角、角速度、前向速度和偏航角速度，并在一个固定周期内完成传感器读取、状态估计、控制律计算和电机输出。如果控制周期抖动过大，机器人会表现为前后摆动、转向迟滞，严重时会失稳倒地。
 
@@ -548,59 +615,19 @@ GIPC_AGGREGATE requests=<N> success=<S> success_rate=<ratio> app_errors=<E> time
 
 实物链路使用 console 标记作为概念验证通道：StarryOS 内的 Python 程序在识别到语音后输出 `@@RT forward` 等行，Axvisor 在 guest console mux 处观察输出并转发给实时侧。该方式避免在演示阶段额外引入 virtio 控制通道，便于快速验证“AI 推理结果进入实时控制闭环”。正式工程化时，仍可复用任务二的 GIPC/IP 协议，把 `@@RT` 命令替换为结构化 CONTROL 消息。
 
-```text
-control_voice.wav
-  -> StarryOS SenseVoice RKNN 推理
-  -> @@RT command console marker
-  -> Axvisor guest console observer
-  -> RT mailbox command
-  -> 8ms wheel balance loop
-  -> MPU6050 + Lingkong motor UART
-  -> 双轮足机器人动作
-```
-
-### 5.3 AI 模型选型原则
+### 5.7 AI 模型选型原则
 
 模型选型遵循轻量、可部署、可复现和结果可解释原则。对于视觉感知类场景，可选择 YOLO 系列轻量模型或已有板级 NPU 示例进行验证；对于非视觉场景，也可使用分类、检测或规则增强模型。模型不追求复杂度最大，而是强调推理结果能够稳定转换为控制语义。
 
-双轮足机器人演示采用语音识别作为 AI 输入。`sensevoice_rknn_npu.py` 以 16 kHz 单声道 wav 为输入，完成 fbank80、LFR、CMVN 等前处理后调用 RKNN runtime，在 RK3588 NPU 上执行 SenseVoice encoder，并将中文短语映射到有限控制命令集合。固定命令集合包括前进、后退、左转、右转和停止，避免智能侧直接注入任意速度、偏航角速度或电机电流。
+双轮足机器人演示采用语音识别作为 AI 输入，原因是语音命令可以直接映射为有限动作集合，便于演示“AI 识别结果进入实时控制闭环”，同时不会把不稳定的连续控制量交给智能侧模型生成。
 
-### 5.4 模型部署方式
+### 5.8 模型部署方式
 
 智能侧客户机负责模型文件、推理运行时和输入数据管理。QEMU 阶段可以使用离线样例输入验证链路；开发板阶段可以结合实际摄像头、NPU 或预置输入源进行演示。仓库中 `drivers/npu/` 和 `test-suit/starryos/normal/board-orangepi-5-plus/npu-yolov8/` 可作为 NPU/YOLO 板级验证材料的组织参考。
 
 在机器人实物演示中，智能侧部署在 Orange Pi 5 Plus 上，使用 RK3588 NPU 运行语音模型；控制侧实时路径位于 Axvisor/RT 任务中，直接访问 I2C5、UART3、UART6 和 UART7 等板级外设。启动串口截图 [minicom_output.jpg](assets/minicom_output.jpg) 用于证明系统已经进入板级运行环境，演示视频 [video.mp4](assets/video.mp4) 用于证明语音命令能够驱动机器人动作。
 
-本项目在开发板阶段选型 **SenseVoice 语音识别**作为任务三的智能侧模型，落地链路为：
-
-```text
-Axvisor (EL2, SD 卡加载 guest)
-  -> starry guest (passthrough, vCPU 绑定 A76 大核)
-     -> /dev/dri/card1 (rknpu DRM 重实现)
-        -> librknnrt (C API) -> RK3588 NPU (fp16-scaled 模型)
-           -> CPU 侧 CTC 解码
-```
-
-正确性方法是把推理路径与社区上游运行时（happyme531/SenseVoiceSmall-RKNN2 及模型作者的 rkvoice-stream）逐项对齐：tensor 查询枚举、输入构造（4 个提示帧 + LFR 语音帧）、kaldi 兼容 fbank 前端、CMVN 符号、输出布局与 CTC 解码；前端在宿主机用 kaldi-native-fbank 数值对拍（fbank 偏差 ≤ 3e-4，LFR+CMVN 后 ≤ 4e-5）。板上 zh/en 参考 wav 转写通过（fp16 精度边缘，漏 1-2 字），推理语义与原生 Linux 一致。
-
-### 5.4.1 推理与加载性能优化
-
-智能侧推理最初与原生 Linux 差距明显（单条推理 2.96s vs 1.04s，模型加载 41.2s vs 0.65s）。通过在 card1 ioctl 层增加聚合计时仪表，逐项定位并收敛：
-
-| 优化项 | 问题 | 实测效果（板级，标注日志档与调频状态） |
-| --- | --- | --- |
-| guest vCPU 绑定大核（PR #2166） | guest 运行在 A55 小核（实发约 1175 MHz） | Info 档：模型加载 41.2s→27.1s，推理 2.96s→2.60s |
-| 板级日志降噪（PR #2166） | 每 ioctl 的 info 行 + submit 结构体 dump 约 100KB/轮串口流量 | Error 档：推理 2.60s→1.72s，rknn_init 1.22s→0.66s，加载 26.30s（冷读 25.41s，19.2 MB/s） |
-| 调频 governor 拓扑归因修复（PR #2165） | SMP=1 guest 的 busy 恒记到 A55 簇，实际运行的大核被降到 408 MHz | Error 档＋动态调频：推理 1.72s→1.46s，rknn_init 0.66s→0.50s；冷读 29.82s（16.4 MB/s，突发 I/O 间隙降档所致） |
-| readahead 窗口 1 MiB（PR #2166） | 32 页窗口下 490 MB 模型读发起约 3800 个请求，间隙损失 22% 总线带宽 | 请求与 IDMAC 链上限对齐（板测进行中） |
-
-收敛后 NPU 提交路径达原生水平（7.78 ms/次 vs 原生约 7.5 ms）；剩余模型加载差距由 SD HighSpeed 总线上限决定（冷读实测 16.4～19.2 MB/s，为 24.75 MB/s 总线极限的 66%～78%），后续方向为 UHS-I（SDR104/DDR50）使能，前置的 1.8 V 电压轨与协议状态机工作已在内部分支完成。
-
-优化前后与原生 Linux 的对比图如下，三配置串口原始数据见 `test-plan.md` §5.3：
-
-![SenseVoice 推理与模型加载性能对比](assets/sensevoice-perf.svg)
-
-### 5.5 推理输出到控制执行的链路
+### 5.9 推理输出到控制执行的链路
 
 推理输出先转换为控制侧可理解的动作。例如视觉检测结果可转换为 `STOP`、`MOVE`、`WARN`、`ADJUST` 等控制动作，并附带置信度、目标类别和输入帧编号。智能侧将这些字段封装为任务二定义的协议消息，发送给控制侧。控制侧解析后执行动作，并返回执行状态。
 
@@ -629,7 +656,7 @@ Axvisor (EL2, SD 卡加载 guest)
   -> 智能侧日志记录
 ```
 
-### 5.6 轮足实时控制算法
+### 5.10 轮足实时控制算法
 
 双轮足控制闭环的核心是“状态估计 + LQR 平衡控制 + 运动目标限幅 + 电机协议输出”。`rt-robot` 分支中的控制器以硬件验证过的 ESP32 WBR 控制工程为基础移植，保留确定性的控制数学和协议辅助，去掉 Wi-Fi、阻塞日志和不确定的串口解析路径。
 
@@ -659,7 +686,7 @@ Axvisor (EL2, SD 卡加载 guest)
 
 该算法对实时性的要求来自平衡控制本身，而不是通信协议。语音识别可能需要数百毫秒，属于上层决策输入；一旦命令到达实时侧，机器人保持平衡仍依赖 8ms 闭环持续运行。若智能侧 AI 推理、文件系统、网络或日志负载抢占 Axvisor 预留实时 CPU，或使虚拟化底座在 I/O、调频和中断路径上产生过大抖动，会直接放大控制周期抖动。因此任务一中的 Axvisor 实时 CPU 预留、板级 I/O 路径、调频归因、RT FIFO 调度和 mutex 优先级继承，是让该实物演示稳定运行的必要底座。
 
-### 5.7 状态回传与闭环逻辑
+### 5.11 状态回传与闭环逻辑
 
 闭环逻辑为每条控制指令建立明确结果。智能侧记录指令序列号、推理时间、发送时间、控制侧接收时间、执行完成时间和响应接收时间。控制侧记录接收序列号、动作类型、执行结果、错误码和当前状态。
 
@@ -667,7 +694,7 @@ Axvisor (EL2, SD 卡加载 guest)
 
 机器人实物演示还应额外记录控制侧周期指标，包括本周期 IMU 读取耗时、控制计算耗时、左右电机 UART 事务耗时、deadline miss 次数和超时纳秒数。对于 8ms 闭环，验收关注点不是 AI 推理是否每 8ms 输出一次，而是控制侧在 AI 负载存在时仍能以 8ms 周期持续执行，并在命令超时后安全降级为停止。
 
-### 5.8 前两项任务对任务三的支撑关系
+### 5.12 前两项任务对任务三的支撑关系
 
 任务一为任务三提供稳定的 Axvisor AMP 运行环境和实时侧保障，使 AI 推理负载不会直接破坏控制任务；任务二为任务三提供可复现的跨执行域通信协议，使推理结果能够可靠转换为控制动作；任务三则反过来验证任务一和任务二是否真正可用于工控联动场景。
 

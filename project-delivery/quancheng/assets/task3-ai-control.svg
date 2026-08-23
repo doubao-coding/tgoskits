@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="860" viewBox="0 0 1440 860" role="img" aria-labelledby="title desc">
+  <title id="title">任务三 AI 语音识别与实时控制闭环架构</title>
+  <desc id="desc">展示 RK3588 上 StarryOS 语音识别模型应用生态、模型性能优化、应用启动优化，以及识别结果转换为命令后进入 Axvisor 实时任务控制双轮足机器人。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+    <marker id="greenArrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f766e"/>
+    </marker>
+    <style>
+      .bg { fill: #f8fafc; }
+      .title { font: 700 30px Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #0f172a; }
+      .subtitle { font: 400 15px Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #475569; }
+      .h { font: 700 20px Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #0f172a; }
+      .label { font: 700 16px Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #0f172a; }
+      .body { font: 400 13px Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #334155; }
+      .small { font: 400 12px Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #475569; }
+      .starry { fill: #ecfdf5; stroke: #0f766e; stroke-width: 2; rx: 10; }
+      .rt { fill: #fff7ed; stroke: #ea580c; stroke-width: 2; rx: 10; }
+      .bridge { fill: #eff6ff; stroke: #2563eb; stroke-width: 2; rx: 10; }
+      .work { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.3; rx: 8; }
+      .platform { fill: #e2e8f0; stroke: #94a3b8; stroke-width: 1.5; rx: 8; }
+      .line { fill: none; stroke: #334155; stroke-width: 2; marker-end: url(#arrow); }
+      .green { fill: none; stroke: #0f766e; stroke-width: 2.4; marker-end: url(#greenArrow); }
+      .dash { fill: none; stroke: #64748b; stroke-width: 1.5; stroke-dasharray: 7 5; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="1440" height="860"/>
+  <text class="title" x="720" y="46" text-anchor="middle">任务三：RK3588 语音识别到 Axvisor 实时控制闭环</text>
+  <text class="subtitle" x="720" y="76" text-anchor="middle">StarryOS 适配 RK3588 模型应用生态，识别结果转换为有限指令，经 Axvisor RT 路径驱动 8ms 双轮足控制任务</text>
+
+  <rect class="rt" x="70" y="120" width="360" height="430"/>
+  <text class="h" x="250" y="157" text-anchor="middle">Axvisor 实时侧：预留 CPU 控制任务</text>
+  <rect class="work" x="105" y="190" width="290" height="74"/>
+  <text class="label" x="250" y="222" text-anchor="middle">8ms balance loop</text>
+  <text class="small" x="250" y="245" text-anchor="middle">deadline miss / 控制周期统计</text>
+  <rect class="work" x="105" y="290" width="290" height="74"/>
+  <text class="label" x="250" y="322" text-anchor="middle">EKF + LQR 控制</text>
+  <text class="small" x="250" y="345" text-anchor="middle">状态估计 · 扭矩计算 · 限幅</text>
+  <rect class="work" x="105" y="390" width="290" height="74"/>
+  <text class="label" x="250" y="422" text-anchor="middle">IMU + Motors</text>
+  <text class="small" x="250" y="445" text-anchor="middle">I2C5 · UART3/6/7 · 双轮足动作</text>
+
+  <rect class="bridge" x="555" y="255" width="230" height="160"/>
+  <text class="h" x="670" y="292" text-anchor="middle">控制通道</text>
+  <text class="body" x="670" y="326" text-anchor="middle">guest console observer</text>
+  <text class="body" x="670" y="352" text-anchor="middle">RT mailbox command</text>
+  <text class="small" x="670" y="382" text-anchor="middle">后续可替换为结构化 GIPC CONTROL</text>
+
+  <rect class="starry" x="810" y="120" width="560" height="430"/>
+  <text class="h" x="1090" y="157" text-anchor="middle">StarryOS 智能侧：RK3588 语音识别模型应用生态</text>
+  <rect class="work" x="845" y="190" width="230" height="105"/>
+  <text class="label" x="960" y="222" text-anchor="middle">模型应用生态适配</text>
+  <text class="body" x="960" y="250" text-anchor="middle">SenseVoice / RKNN runtime</text>
+  <text class="small" x="960" y="274" text-anchor="middle">fbank · LFR · CMVN · CTC 解码</text>
+  <rect class="work" x="1105" y="190" width="230" height="105"/>
+  <text class="label" x="1220" y="222" text-anchor="middle">模型性能优化</text>
+  <text class="body" x="1220" y="250" text-anchor="middle">A76 绑核 · 日志降噪</text>
+  <text class="small" x="1220" y="274" text-anchor="middle">NPU ioctl 计时 · readahead</text>
+  <rect class="work" x="845" y="325" width="230" height="105"/>
+  <text class="label" x="960" y="357" text-anchor="middle">应用启动优化</text>
+  <text class="body" x="960" y="385" text-anchor="middle">SD 模型加载路径收敛</text>
+  <text class="small" x="960" y="409" text-anchor="middle">rootfs / autostart / 样例输入</text>
+  <rect class="work" x="1105" y="325" width="230" height="105"/>
+  <text class="label" x="1220" y="357" text-anchor="middle">命令语义生成</text>
+  <text class="body" x="1220" y="385" text-anchor="middle">前进 / 后退 / 左转 / 右转 / 停止</text>
+  <text class="small" x="1220" y="409" text-anchor="middle">有限动作集合 · 限幅 · watchdog</text>
+  <rect class="work" x="975" y="455" width="260" height="55"/>
+  <text class="label" x="1105" y="488" text-anchor="middle">语音识别成功后输出 @@RT token</text>
+
+  <path class="green" d="M 975 482 C 890 482, 850 352, 785 335"/>
+  <path class="green" d="M 555 335 C 500 335, 460 250, 395 228"/>
+  <path class="line" d="M 250 464 C 250 610, 1105 610, 1105 510"/>
+  <text class="small" x="720" y="585" text-anchor="middle">状态与证据回传：执行结果、周期耗时、deadline miss、串口日志、演示视频</text>
+
+  <rect class="platform" x="70" y="680" width="1300" height="105"/>
+  <text class="h" x="720" y="715" text-anchor="middle">Orange Pi 5 Plus / RK3588 + Axvisor AMP</text>
+  <text class="body" x="720" y="746" text-anchor="middle">StarryOS guest 负责模型应用生态与推理；Axvisor 预留 CPU 负责实时控制；二者通过受控命令通道形成闭环</text>
+  <text class="small" x="720" y="772" text-anchor="middle">交付证据：control_voice.wav · minicom_output.jpg · video.mp4 · SenseVoice 性能数据 · RT 周期日志</text>
+
+  <path class="dash" d="M 250 550 L 250 680"/>
+  <path class="dash" d="M 1090 550 L 1090 680"/>
+</svg>
