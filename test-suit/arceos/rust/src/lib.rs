@@ -53,6 +53,9 @@ pub mod net;
     any(
         feature = "sched-cfs",
         feature = "sched-rr",
+        feature = "sched-rt-fifo",
+        feature = "sched-rt-fifo-smp",
+        feature = "sched-rt-fifo-iso",
         feature = "task-affinity",
         feature = "task-ipi",
         feature = "task-irq",
@@ -116,6 +119,17 @@ test_runner!("memtest", run_memtest, mem::test::run);
 test_runner!("net-loopback", run_net_loopback, net::loopback::run);
 test_runner!("sched-cfs", run_sched_cfs, task::priority::run);
 test_runner!("sched-rr", run_sched_rr, task::priority::run);
+test_runner!("sched-rt-fifo", run_sched_rt_fifo, task::rt_fifo::run);
+test_runner!(
+    "sched-rt-fifo-smp",
+    run_sched_rt_fifo_smp,
+    task::rt_fifo_smp::run
+);
+test_runner!(
+    "sched-rt-fifo-iso",
+    run_sched_rt_fifo_iso,
+    task::rt_fifo_iso::run
+);
 test_runner!("task-affinity", run_task_affinity, task::affinity::run);
 test_runner!("task-ipi", run_task_ipi, task::ipi::run);
 test_runner!("task-irq", run_task_irq, task::irq::run);
@@ -207,6 +221,24 @@ const SELECTED_TESTS: &[TestCase] = &[
         "sched-rr",
         "round-robin scheduling priority smoke",
         run_sched_rr,
+    ),
+    #[cfg(feature = "sched-rt-fifo")]
+    TestCase::new(
+        "sched-rt-fifo",
+        "realtime FIFO scheduling and mutex priority inheritance",
+        run_sched_rt_fifo,
+    ),
+    #[cfg(feature = "sched-rt-fifo-smp")]
+    TestCase::new(
+        "sched-rt-fifo-smp",
+        "realtime FIFO SMP cross-CPU wake via forced reschedule IPI",
+        run_sched_rt_fifo_smp,
+    ),
+    #[cfg(feature = "sched-rt-fifo-iso")]
+    TestCase::new(
+        "sched-rt-fifo-iso",
+        "realtime FIFO host-internal CPU isolation via RT_CPUMASK",
+        run_sched_rt_fifo_iso,
     ),
     #[cfg(feature = "task-affinity")]
     TestCase::new("task-affinity", "task CPU affinity", run_task_affinity),

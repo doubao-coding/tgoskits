@@ -1,0 +1,8 @@
+features = []
+log = "Info"
+max_cpu_num = 2
+
+[env]
+BACKTRACE = "y"
+DWARF = "y"
+RT_CPUMASK = "1"

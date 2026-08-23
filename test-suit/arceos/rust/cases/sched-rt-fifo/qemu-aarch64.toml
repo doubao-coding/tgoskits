@@ -1,0 +1,25 @@
+args = [
+    "-machine",
+    "virt,gic-version=2",
+    "-m",
+    "256M",
+    "-cpu",
+    "cortex-a72",
+    "-smp",
+    "1",
+    "-display",
+    "none",
+    "-serial",
+    "mon:stdio",
+]
+
+timeout = 120
+uefi = false
+to_bin = true
+success_regex = ["ArceOS test suite run OK!"]
+fail_regex = ["(?i)\\bpanic(?:ked)?\\b", "ARCEOS_TEST_FAIL"]
+
+[host_http_server]
+bind = "127.0.0.1"
+port = 18183
+body = "ArceOS rust test suite host fixture\n"

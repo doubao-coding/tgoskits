@@ -6,8 +6,16 @@ pub mod ipi;
 pub mod irq;
 #[cfg(feature = "task-parallel")]
 pub mod parallel;
+#[cfg(any(feature = "sched-cfs", feature = "sched-rr", feature = "sched-rt-fifo"))]
+pub mod pi_latency;
 #[cfg(any(feature = "task-priority", feature = "sched-cfs", feature = "sched-rr"))]
 pub mod priority;
+#[cfg(feature = "sched-rt-fifo")]
+pub mod rt_fifo;
+#[cfg(feature = "sched-rt-fifo-iso")]
+pub mod rt_fifo_iso;
+#[cfg(feature = "sched-rt-fifo-smp")]
+pub mod rt_fifo_smp;
 #[cfg(feature = "task-sleep")]
 pub mod sleep;
 #[cfg(feature = "task-smp-online")]
