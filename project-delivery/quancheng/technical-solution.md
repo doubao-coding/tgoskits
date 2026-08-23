@@ -132,47 +132,120 @@ Axvisor 作为二者之下的虚拟化底座，负责把两类客户机放在同
 
 ## 4. 任务二：客户机通信与协议设计
 
-### 4.1 任务目标
+### 4.1 目标、范围与八项变更的依赖关系
 
-任务二目标是在智能侧客户机与控制侧客户机之间建立稳定通信链路，并定义面向 AI 联动控制的应用层协议。该任务围绕连通性、控制语义表达、异常检测和自动化复现展开。
+任务二的目标是在同一 Axvisor 实例承载的 StarryOS/Linux 智能侧客户机与 ArceOS/RTOS 控制侧客户机之间，建立一条可启动、可寻址、可观测、可恢复的双向 IPv4/TCP 通信链路，并在链路之上提供控制指令、状态回传、心跳和错误通知的应用层语义。业务数据只经过标准网卡、Ethernet、IPv4 和 TCP；共享内存、HyperCall、裸 MMIO 和 vsock 不进入业务数据路径。
 
-### 4.2 通信拓扑与链路设计
+本任务不是孤立新增一个 socket 示例，而是由 8 项已提交变更逐层组成：
 
-通信拓扑以客户机间 IP 通信为主，底层可使用虚拟网卡、QEMU 网络、桥接网络或板级网络配置实现。智能侧客户机作为推理与控制指令发起方，控制侧客户机作为控制服务提供方。通信链路承载指令下发、状态回传、心跳检测和异常通知。
+| 层次 | PR/提交 | 设计职责 | 对后续层的保证 |
+| --- | --- | --- | --- |
+| 启动与设备前置 | [#1926](https://github.com/rcore-os/tgoskits/pull/1926) | 保留 guest FDT 中 PSCI 信息 | 两个 guest 能按预期启动，vCPU/定时器基础路径不被破坏 |
+| 虚拟设备前置 | [#1935](https://github.com/rcore-os/tgoskits/pull/1935) | 提供 VirtIO-MMIO 设备核心 | 客户机镜像和虚拟设备拥有稳定的 MMIO 接入基础 |
+| 二层网络前置 | [#1927](https://github.com/rcore-os/tgoskits/pull/1927) | 双 guest VirtIO-net、MAC 和进程内 L2 switch | 两个客户机拥有隔离的网卡端点和可交换的二层帧路径 |
+| IP 传输 | [#2155](https://github.com/rcore-os/tgoskits/pull/2155) | StarryOS/ArceOS QEMU VM、VirtIO-net 和拓扑配置 | 应用程序可以使用 `10.0.42.0/24` 私有子网进行 TCP 通信 |
+| 应用协议 | [#2156](https://github.com/rcore-os/tgoskits/pull/2156) | GIPC 固定头帧、两端程序和编解码 | 控制、状态、错误和心跳具有稳定的线协议 |
+| 可靠性 | [#2157](https://github.com/rcore-os/tgoskits/pull/2157) | TCP 分帧、超时、重连、序列窗口和恢复 | 字节流断连或重复请求不会被静默当作成功 |
+| 验证 | [#2158](https://github.com/rcore-os/tgoskits/pull/2158) | QEMU 启动、rootfs 注入、日志和指标聚合 | 链路行为可由脚本复现并以非零退出码传递失败 |
+| 启动补齐与观测 | [#2159](https://github.com/rcore-os/tgoskits/pull/2159) | StarryOS 网卡初始化、多请求和错误/恢复指标 | 文档地址成为实际启动配置，长运行结果可量化比较 |
 
-仓库现有 StarryOS 和 ArceOS 网络测试用例可作为基础验证参考，例如 `test-suit/arceos/rust/net/` 下的 HTTP/UDP 示例，以及 StarryOS QEMU 配置中的 `virtio-net` 网络设备配置。
+八项变更的共同边界是任务二通信底座：它们不实现具体 AI 模型、不规定某种摄像头或 NPU 驱动，也不把控制动作绑定到某个板卡外设；任务三只需把推理结果编码到已有 payload，并使用本章定义的请求/响应流程。
 
-### 4.3 虚拟网卡与网络配置
+![StarryOS 与 ArceOS 客户机 IP 通信架构](assets/network-communication.svg)
 
-QEMU 验证中可通过 `virtio-net-pci` 与 `-netdev` 配置建立客户机网络能力。多客户机场景包含客户机 IP 地址、端口、协议方向和启动顺序等信息。用户态网络更偏功能验证，tap/bridge 或板级网络更接近真实部署环境。
+### 4.2 部署拓扑、地址规划与设备所有权
 
-网络配置应做到可复现：配置文件保存 QEMU 参数，启动脚本输出实际 IP、端口和路由信息，测试脚本记录每次请求的时间戳、响应码和失败原因。
+默认验收拓扑采用 Axvisor 进程内二层交换，不连接宿主桥、TAP、NAT 或物理上联。Axvisor 为每个 VM 创建一个 VirtIO-net MMIO 端点，并将端点注册到同一个内部交换机；交换机只在两个已注册端口之间转发 Ethernet 帧。每个端点的 MAC 地址在 VM TOML 中固定，避免 DHCP 或随机地址导致测试不可复现。
 
-### 4.4 应用层协议格式
+| 角色 | VM | 网卡 | MAC | IPv4/前缀 | 业务职责 |
+| --- | --- | --- | --- | --- | --- |
+| 智能侧 | StarryOS/Linux | `virtnet0` / `eth0` | `52:54:00:42:00:01` | `10.0.42.1/24` | 发起 CONTROL、HEARTBEAT，接收 STATUS/ERROR，汇总指标 |
+| 控制侧 | ArceOS/RTOS | `virtnet0` / `eth0` | `52:54:00:42:00:02` | `10.0.42.2/24` | 监听 TCP 4242，校验请求，返回 STATUS/ERROR |
+| 交换侧 | Axvisor | 内部 L2 switch | 不向 guest 暴露独立 IP | 二层转发 | 维护端口注册、帧转发和 guest 唤醒 |
 
-应用层协议采用固定头部加负载的方式，便于 C/Rust 侧实现和测试。
+StarryOS 启动时由 `/usr/bin/gipc-network-init.sh` 完成 `eth0` 配置：检查 `ip` 工具和接口存在，执行 `ip link set eth0 up`，配置 `10.0.42.1/24`，确认 `10.0.42.0/24` 直连路由后才启动 GIPC 客户端。ArceOS 服务端在发现 `eth0` 后调用 `ax_net::set_interface_ipv4(..., 10.0.42.2, 24)`，再绑定 `0.0.0.0:4242`。两个客户机不依赖默认网关，业务只在私有 /24 子网内通信。
 
-| 字段 | 说明 |
-| --- | --- |
-| `magic` | 协议魔数，用于快速识别消息。 |
-| `version` | 协议版本，便于后续扩展。 |
-| `msg_type` | 消息类型，如推理结果、控制指令、状态回传、心跳、错误。 |
-| `seq` | 序列号，用于请求响应匹配和重传判断。 |
-| `timestamp_ns` | 发送端时间戳，用于端到端时延测量。 |
-| `payload_len` | 负载长度。 |
-| `payload` | JSON、CBOR 或固定二进制结构，承载类别、置信度、控制动作和状态码。 |
+设备所有权保持在 Axvisor：VM 配置决定设备模型、MMIO 区域、IRQ 和 guest MAC；VirtIO-net 驱动负责队列和 DMA；交换机负责二层转发；guest 应用只拥有自己的 socket、协议会话和业务状态。块设备可以承载 rootfs 或镜像，但不承载 GIPC 业务数据。
 
-任务三使用该协议时，智能侧发送的核心负载包含 AI 推理类别、置信度、控制目标和候选动作；控制侧返回的核心负载包含执行结果、当前状态、错误码和控制侧时间戳。
+### 4.3 网络启动时序与数据路径
 
-### 4.5 可靠性机制
+启动时序必须先建立底层能力，再打开业务端口，避免客户端把“进程启动”误报为“网络可用”：
 
-可靠性机制包括心跳、超时、重试、序列号去重和降级处理。智能侧在连续心跳失败或控制响应超时时进入保守状态。控制侧收到重复序列号时保留去重语义，对非幂等动作进行重复执行保护，并返回最近一次执行结果或重复请求错误码。
+1. Axvisor 读取 board/QEMU/VM 配置，创建两个 VM、vCPU、地址空间、VirtIO-net MMIO 节点和内部交换机端口。
+2. StarryOS guest 启动，完成 VirtIO-net 设备发现和 `eth0` 创建。
+3. ArceOS guest 启动，配置 `eth0 = 10.0.42.2/24`，打印 `GIPC_RTOS_READY` 和 `GIPC_RTOS_LISTEN ip=10.0.42.2 port=4242`。
+4. StarryOS 执行网络初始化脚本，打印 `GIPC_STARRY_NET_READY interface=eth0 address=10.0.42.1/24 peer=10.0.42.2`。
+5. StarryOS 客户端建立 TCP 连接，发送 CONTROL 或 HEARTBEAT；只有收到合法 STATUS/ERROR 后才记录一次应用层响应。
+6. QEMU/测试运行器收集双方串口和客户端日志，`verify_metrics.py` 验证成功标志和正延迟/吞吐，`aggregate_metrics.py` 计算整体统计。
 
-测试覆盖正常通信、丢包模拟、超时响应、协议字段错误、重复请求和控制侧重启后的恢复行为。
+数据路径为：StarryOS socket → StarryOS TCP/IP → `eth0` VirtIO TX queue → Axvisor VirtIO-net backend → 内部 L2 switch → ArceOS VirtIO RX queue → ArceOS TCP/IP → TCP listener。响应沿相反方向返回。任何共享内存、HyperCall 或裸 MMIO 访问只属于设备实现或控制面，不属于业务 payload 路径。
 
-### 4.6 通信安全与异常处理
+### 4.4 GIPC 应用层帧与消息语义
 
-比赛场景下的通信安全重点是边界清晰和异常可控。协议解析校验长度、版本、消息类型和负载合法性，降低非法消息触发控制侧崩溃的风险。对于超出范围的控制动作，控制侧拒绝执行并返回错误码。日志记录消息序列号、错误类型和时间戳，便于验收复盘。
+GIPC 使用固定 32 字节大端序头部加不超过 1200 字节 payload 的 framing，解决 TCP 字节流的粘包、拆包和边界恢复问题。头部布局如下：
+
+| 偏移 | 长度 | 字段 | 语义与校验 |
+| ---: | ---: | --- | --- |
+| 0 | 4 | `magic` | 固定 `0x47495043`（`GIPC`），拒绝错误协议流 |
+| 4 | 1 | `version` | 当前版本 `1`，未知版本返回/记录 `UnsupportedVersion` |
+| 5 | 1 | `message_type` | `Hello=1`、`Control=2`、`Status=3`、`Error=4`、`Heartbeat=5`、`Ack=6` |
+| 6 | 2 | `flags` | `ACK_REQUIRED` 等控制标志，按大端序编码 |
+| 8 | 2 | `header_len` | 必须为 32，避免错误版本改变字段解释 |
+| 10 | 2 | `payload_len` | 必须不超过 1200，读取完整帧前先做边界检查 |
+| 12 | 4 | `sequence` | 请求/响应关联、重复检测和乱序判断 |
+| 16 | 8 | `timestamp_ns` | 单调时钟时间戳，用于 RTT 和阶段耗时统计 |
+| 24 | 2 | `error_code` | `None`、`UnsupportedVersion`、`InvalidLength`、`ChecksumMismatch`、`InvalidSequence`、`InvalidPayload`、`UnsupportedMessage`、`Busy` |
+| 26 | 4 | `checksum` | CRC32；计算时将 checksum 字段置零 |
+| 30 | 2 | 保留 | 当前置零，为后续兼容留出空间 |
+
+消息处理规则如下：
+
+- `CONTROL`：智能侧发起控制请求，payload 当前为固定控制结构；控制侧先完成头、长度、CRC 和序列检查，再进入控制状态机。
+- `STATUS`：控制侧返回执行状态和原请求序列号；TCP profile 用合法的响应帧作为应用交付确认，不额外伪造 UDP 式 ACK。
+- `ERROR`：携带错误码和序列号，表示版本、长度、校验、序列、payload 或消息类型错误；客户端将其计入应用层错误并让验证器失败。
+- `HEARTBEAT`：用于检测会话活性，按与 CONTROL 相同的 framing 和响应关联规则处理。
+- `ACK`：协议保留类型，用于未来不可靠传输或显式确认扩展；当前主路径为 TCP，不把 ACK 当作 TCP 字节流可靠性的替代品。
+
+### 4.5 TCP 可靠性、状态机与异常恢复
+
+TCP 只保证有序字节流，不保证应用请求已经被处理，因此实现仍需维护应用层状态：
+
+| 状态/事件 | StarryOS 客户端行为 | ArceOS 服务端行为 |
+| --- | --- | --- |
+| 建连 | 最多尝试 3 次，socket 读写超时为 1 秒 | `accept` 新连接并建立会话 |
+| 发送 | 为每个进程内请求分配递增 `sequence`，完整写入 32-byte header + payload | `read_header` 后按 `payload_len` 精确读取完整帧 |
+| 正常响应 | 校验 magic/version/type/sequence/CRC，记录 STATUS 和 RTT | 返回同序列 STATUS，保留控制状态 |
+| ERROR | 读取 `error_code`，计入 `errors`，拒绝伪造成功 | 对非法 payload、序列或消息类型返回 ERROR |
+| 读写超时/断连 | 关闭当前 socket，增加 timeout，重新 connect 并重发未完成请求 | 记录 recoverable error，关闭当前会话并继续 accept |
+| 重复 sequence | 客户端只接受当前请求的匹配响应 | `ReliableSession` 分类 `Duplicate`，控制请求返回最近状态而不重复执行 |
+| 旧/乱序 sequence | 计入协议错误 | 分类 `OutOfOrder`，返回 `InvalidSequence` |
+| 重试预算耗尽 | 输出 `GIPC_STARRY_TIMEOUT` 并返回非零 | 由上层日志记录会话失败，不静默降级到非 IP 通道 |
+
+每个请求的最大尝试次数为 3；重连不是成功本身，只有收到匹配的 STATUS 才计入 `success`。同一进程的序列号从 1 递增，多请求运行可验证响应关联。由于当前 ArceOS 服务端按 TCP 连接创建 `ReliableSession`，跨连接的长期幂等去重仍应由控制动作设计保证；对于非幂等动作，应用层应使用序列号和最近执行状态防止重复执行。
+
+### 4.6 安全边界、故障模型与访问控制
+
+默认拓扑通过“不连接宿主网络”缩小攻击面：没有默认网关、NAT 或宿主 bridge，业务服务只绑定客户机私有网段上的 TCP 4242。配置文档固定对端 MAC/IP，运行日志打印实际接口、地址、peer 和端口；后续板级或桥接变体必须单独记录二层边界、路由、NAT 和防火墙规则，不能悄悄替换默认测试拓扑。
+
+协议解码在执行控制动作前完成 magic、version、header_len、payload_len、message_type、error_code、sequence 和 CRC 校验；超过最大 payload、未知类型、非法错误码或校验失败均不得进入控制状态机。错误路径必须产生 ERROR 或明确的断连/错误日志，验证脚本以非零返回传播失败。
+
+故障模型覆盖：接口不存在、地址配置失败、服务端尚未监听、TCP 建连失败、半帧/粘包、CRC 损坏、版本不兼容、非法 payload、重复请求、乱序请求、读写超时和服务端重启。共享内存、HyperCall、裸 MMIO 和 vsock 不得作为这些故障的隐式 fallback。
+
+### 4.7 可观测性、指标定义与验收证据
+
+客户端输出 `GIPC_STARRY_STATUS` 和 `GIPC_STARRY_METRIC`，聚合器输出 `GIPC_AGGREGATE`。指标定义如下：
+
+| 指标 | 计算方式 | 用途 |
+| --- | --- | --- |
+| 请求成功率 | `success / requests` | 判断应用层请求是否全部完成 |
+| 应用层错误 | ERROR 帧、CRC/版本/类型/序列校验失败计数 | 区分业务拒绝和协议异常 |
+| 超时次数 | connect/read/write 超时累计 | 判断链路或服务端响应是否失活 |
+| 重连次数 | 非首次尝试建立的 TCP 连接数 | 衡量断连恢复压力 |
+| 恢复成功率 | 发生重连后最终收到合法 STATUS 的请求比例 | 判断自动恢复是否真正完成 |
+| RTT P50/P95 | 单请求发送到匹配响应的单调时钟差分 | 衡量典型和尾部请求延迟 |
+| 有效吞吐量 | 成功响应 payload 字节数 / 请求响应耗时 | 排除连接失败后的有效应用数据率 |
+
+验证分为三层：`cargo test -p guest-ip-protocol` 覆盖帧和可靠会话状态机；C 客户端与 ArceOS 服务端构建/Clippy 检查覆盖两端接口；`run-qemu-aarch64-starry-rtos-gipc.sh`、`verify_metrics.py` 和 `aggregate_metrics.py` 组成 QEMU 运行和指标验收入口。成功日志至少应按顺序包含 `GIPC_STARRY_NET_READY`、`GIPC_RTOS_READY`、`GIPC_RTOS_LISTEN`、`GIPC_STARRY_STATUS` 和 `GIPC_STARRY_METRIC`；任何 timeout、ERROR 或成功率不足均以非零状态结束。
 
 ## 5. 任务三：AI 联动控制应用设计
 
