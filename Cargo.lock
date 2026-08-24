@@ -1445,6 +1445,7 @@ dependencies = [
  "ax-errno 0.6.1",
  "ax-hal",
  "ax-std",
+ "ax-task",
  "axbuild",
  "axplat-dyn",
  "axtest",

@@ -176,6 +176,10 @@ impl HostCpu for ArceOsHost {
 }
 
 pub(crate) fn cpu_mask_from_raw_bits(bits: usize) -> api::task::AxCpuMask {
+    assert!(
+        modules::ax_task::ordinary_affinity_bits_valid(bits),
+        "vCPU affinity {bits:#x} intersects the configured realtime CPU"
+    );
     api::task::AxCpuMask::from_raw_bits(bits)
 }
 
@@ -225,11 +229,15 @@ fn send_ipi_to_all_except_current(cpu_num: usize) {
     if cpu_num <= 1 {
         return;
     }
-    let cpu_id = modules::ax_hal::percpu::this_cpu_id();
-    modules::ax_hal::irq::send_ipi(
-        modules::ax_hal::irq::ipi_irq(),
-        modules::ax_hal::irq::IpiTarget::AllExceptCurrent { cpu_id, cpu_num },
-    );
+    let current_cpu = modules::ax_hal::percpu::this_cpu_id();
+    for cpu_id in 0..cpu_num {
+        // The broadcast is also used to wake reserved per-CPU virtualization
+        // initialization tasks. Infrastructure tasks are allowed on the
+        // realtime CPU; only ordinary workload affinity is isolated there.
+        if cpu_id != current_cpu {
+            send_ipi(cpu_id);
+        }
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -333,6 +341,7 @@ impl HostPlatform for ArceOsHost {
         crate::percpu::reset_enabled_cpu_mask();
 
         let cpu_count = self.cpu_count();
+        let virtualization_cpu_count = cpu_count;
         let current_cpu = self.this_cpu_id();
         info!("Core {current_cpu} is initializing hardware virtualization support...");
         self.enable_virtualization_on_current_cpu()?;
@@ -356,7 +365,7 @@ impl HostPlatform for ArceOsHost {
                 modules::ax_task::default_task_stack_size(),
             );
             task.set_cpumask(<Self as HostCpu>::CpuMask::one_shot(cpu_id));
-            modules::ax_task::spawn_task(task);
+            modules::ax_task::spawn_task_reserved(task);
             if cpu_id != self.this_cpu_id() {
                 send_ipi(cpu_id);
             }
@@ -365,7 +374,7 @@ impl HostPlatform for ArceOsHost {
         info!("Waiting for all cores to enable hardware virtualization...");
         let start = self.monotonic_time();
         let mut wait_rounds = 0usize;
-        while CORES.load(Ordering::Acquire) != cpu_count {
+        while CORES.load(Ordering::Acquire) != virtualization_cpu_count {
             thread::yield_now();
             wait_rounds = wait_rounds.wrapping_add(1);
             if wait_rounds.is_multiple_of(256) {
@@ -377,12 +386,15 @@ impl HostPlatform for ArceOsHost {
         }
         CurrentArch::register_platform_irq_injector();
         let enabled_count = CORES.load(Ordering::Acquire);
-        if enabled_count == cpu_count {
-            info!("All cores have enabled hardware virtualization support.");
+        if enabled_count == virtualization_cpu_count {
+            info!(
+                "All {virtualization_cpu_count} AxVM-owned cores have enabled hardware \
+                 virtualization support."
+            );
         } else {
             warn!(
-                "Only {enabled_count}/{cpu_count} cores enabled hardware virtualization before \
-                 timeout; continuing with host CPU mask {:#x}",
+                "Only {enabled_count}/{virtualization_cpu_count} AxVM-owned cores enabled \
+                 hardware virtualization before timeout; continuing with host CPU mask {:#x}",
                 crate::percpu::enabled_cpu_mask()
             );
         }

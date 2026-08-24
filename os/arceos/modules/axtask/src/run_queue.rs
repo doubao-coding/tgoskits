@@ -213,7 +213,10 @@ where
 ))]
 fn request_remote_reschedule(cpu_id: usize) {
     request_remote_reschedule_if_not_pending(&REMOTE_RESCHEDULE_PENDING[cpu_id], || {
-        ax_ipi::run_on_cpu(cpu_id, request_current_reschedule);
+        ax_hal::irq::send_ipi(
+            ax_hal::irq::ipi_irq(),
+            ax_hal::irq::IpiTarget::Other { cpu_id },
+        );
     });
 }
 
@@ -224,7 +227,10 @@ fn request_remote_reschedule(cpu_id: usize) {
 ))]
 fn force_remote_reschedule(cpu_id: usize) {
     force_remote_reschedule_request(&REMOTE_RESCHEDULE_PENDING[cpu_id], || {
-        ax_ipi::run_on_cpu(cpu_id, request_current_reschedule);
+        ax_hal::irq::send_ipi(
+            ax_hal::irq::ipi_irq(),
+            ax_hal::irq::IpiTarget::Other { cpu_id },
+        );
     });
 }
 

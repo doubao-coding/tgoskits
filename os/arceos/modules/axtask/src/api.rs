@@ -53,6 +53,9 @@ cfg_if::cfg_if! {
     } else if #[cfg(feature = "sched-cfs")] {
         pub(crate) type AxTask = ax_sched::CFSTask<TaskInner>;
         pub(crate) type Scheduler = ax_sched::CFScheduler<TaskInner>;
+    } else if #[cfg(feature = "sched-rt-fifo")] {
+        pub(crate) type AxTask = ax_sched::RtFifoTask<TaskInner>;
+        pub(crate) type Scheduler = ax_sched::RtFifoScheduler<TaskInner>;
     } else {
         // If no scheduler features are set, use FIFO as the default.
         pub(crate) type AxTask = ax_sched::FifoTask<TaskInner>;
@@ -145,10 +148,45 @@ pub fn with_current_lockdep_stack<R>(f: impl FnOnce(&mut HeldLockStack) -> R) ->
 pub fn init_scheduler() {
     info!("Initialize scheduling...");
 
+    validate_realtime_cpu();
+
     // Initialize the run queue.
     crate::run_queue::init();
 
     info!("  use {} scheduler.", Scheduler::scheduler_name());
+}
+
+fn validate_realtime_cpu() {
+    let Some(cpu_id) = realtime_cpu_id() else {
+        return;
+    };
+    assert!(
+        cpu_id < ax_hal::cpu_num(),
+        "REALTIME_CPU_ID {cpu_id} is not an online CPU"
+    );
+    assert_ne!(
+        cpu_id,
+        ax_hal::percpu::this_cpu_id(),
+        "the primary CPU cannot be the realtime CPU"
+    );
+}
+
+/// Returns the compile-time selected realtime CPU, or `None` when disabled.
+pub const fn realtime_cpu_id() -> Option<usize> {
+    crate::build_info::REALTIME_CPU_ID
+}
+
+/// Returns whether `cpu_id` is reserved for realtime work.
+pub const fn is_realtime_cpu(cpu_id: usize) -> bool {
+    matches!(realtime_cpu_id(), Some(realtime_cpu_id) if realtime_cpu_id == cpu_id)
+}
+
+/// Returns whether an ordinary task affinity bitmap avoids the realtime CPU.
+pub const fn ordinary_affinity_bits_valid(bits: usize) -> bool {
+    match realtime_cpu_id() {
+        Some(cpu_id) if cpu_id < usize::BITS as usize => bits & (1usize << cpu_id) == 0,
+        _ => true,
+    }
 }
 
 pub(crate) fn cpu_mask_full() -> AxCpuMask {
@@ -158,7 +196,9 @@ pub(crate) fn cpu_mask_full() -> AxCpuMask {
         let cpu_num = ax_hal::cpu_num();
         let mut cpumask = AxCpuMask::new();
         for cpu_id in 0..cpu_num {
-            cpumask.set(cpu_id, true);
+            if Some(cpu_id) != realtime_cpu_id() {
+                cpumask.set(cpu_id, true);
+            }
         }
         cpumask
     });
@@ -207,10 +247,72 @@ pub fn note_programmed_timer_deadline_nanos(deadline_nanos: u64) {
 
 /// Adds the given task to the run queue, returns the task reference.
 pub fn spawn_task(task: TaskInner) -> AxTaskRef {
+    assert!(
+        realtime_cpu_id().is_none_or(|cpu_id| !task.cpumask().get(cpu_id)),
+        "ordinary task affinity intersects the configured realtime CPU"
+    );
+    spawn_task_inner(task)
+}
+
+fn spawn_task_inner(task: TaskInner) -> AxTaskRef {
     let task_ref = task.into_arc();
     register_task(&task_ref);
     select_run_queue::<NoPreemptIrqSave>(&task_ref).add_task(task_ref.clone());
     task_ref
+}
+
+/// Spawns an infrastructure task whose affinity is managed by a platform
+/// owner (for example, per-CPU hardware initialization).
+#[doc(hidden)]
+pub fn spawn_task_reserved(task: TaskInner) -> AxTaskRef {
+    spawn_task_inner(task)
+}
+
+/// Error returned when a realtime task cannot be created.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpawnRealtimeError {
+    /// No realtime CPU was selected at build time.
+    RealtimeDisabled,
+    /// Realtime priority must be greater than zero and fit in `i32`.
+    InvalidPriority,
+}
+
+impl fmt::Display for SpawnRealtimeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RealtimeDisabled => f.write_str("realtime CPU is disabled"),
+            Self::InvalidPriority => f.write_str("realtime priority must be in 1..=i32::MAX"),
+        }
+    }
+}
+
+impl core::error::Error for SpawnRealtimeError {}
+
+/// Spawns a task pinned to the configured realtime CPU.
+///
+/// Affinity and priority are installed before the task is made runnable, so
+/// callers do not need to construct or retain an [`AxCpuMask`].
+#[cfg(any(feature = "sched-rt-fifo", feature = "realtime-task"))]
+pub fn spawn_realtime<F>(
+    f: F,
+    name: String,
+    stack_size: usize,
+    priority: isize,
+) -> Result<AxTaskRef, SpawnRealtimeError>
+where
+    F: FnOnce() + Send + 'static,
+{
+    let cpu_id = realtime_cpu_id().ok_or(SpawnRealtimeError::RealtimeDisabled)?;
+    let priority = i32::try_from(priority)
+        .ok()
+        .filter(|priority| *priority > 0)
+        .ok_or(SpawnRealtimeError::InvalidPriority)?;
+    let task = TaskInner::new(f, name, stack_size);
+    let mut mask = AxCpuMask::new();
+    mask.set(cpu_id, true);
+    task.set_cpumask(mask);
+    task.set_sched_priority(priority);
+    Ok(spawn_task_inner(task))
 }
 
 /// Spawns a new task with the given parameters.
@@ -268,7 +370,7 @@ pub fn set_priority(prio: isize) -> bool {
 pub fn set_current_affinity(cpumask: AxCpuMask) -> bool {
     might_sleep();
 
-    if cpumask.is_empty() {
+    if cpumask.is_empty() || realtime_cpu_id().is_some_and(|cpu_id| cpumask.get(cpu_id)) {
         false
     } else {
         let curr = current().clone();

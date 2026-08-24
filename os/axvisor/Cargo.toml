@@ -57,6 +57,8 @@ sdmmc = [
 ]
 rockchip-pm = ["ax-driver/rockchip-pm"]
 stack-protector = ["ax-std/stack-protector"]
+sched-rt-fifo = ["ax-std/sched-rt-fifo"]
+realtime-benchmark = ["ax-std/realtime-task"]
 
 [dependencies]
 spin = { workspace = true }
@@ -74,6 +76,7 @@ axvm = { workspace = true, default-features = false }
 axvmconfig = { workspace = true, default-features = false }
 # System independent crates provided by ArceOS
 ax-errno = { workspace = true }
+ax-task = { workspace = true }
 ax-driver.workspace = true
 axplat-dyn.workspace = true
 

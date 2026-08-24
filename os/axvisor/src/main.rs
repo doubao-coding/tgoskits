@@ -34,6 +34,8 @@ mod config;
 mod manager;
 #[cfg(target_arch = "riscv64")]
 mod platform_irq;
+#[cfg(feature = "realtime-benchmark")]
+mod realtime;
 mod shell;
 
 /// Axvisor kernel entry point.
@@ -47,11 +49,20 @@ mod shell;
 fn main() {
     banner::print_logo();
 
-    info!("Starting virtualization...");
-    let manager = manager::AxvmManager::new().expect("failed to initialize AxVM manager");
-
-    manager.init_default_vms();
-    manager.start_default_vms();
+    #[cfg(feature = "realtime-benchmark")]
+    {
+        info!("Starting AMP host realtime benchmark without guest");
+        realtime::start();
+        info!("AMP realtime task submitted");
+        ax_std::thread::yield_now();
+    }
+    #[cfg(not(feature = "realtime-benchmark"))]
+    {
+        info!("Starting virtualization...");
+        let manager = manager::AxvmManager::new().expect("failed to initialize AxVM manager");
+        manager.init_default_vms();
+        manager.start_default_vms();
+    }
 
     info!("[OK] Default guest initialized");
 
