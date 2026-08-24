@@ -66,8 +66,25 @@ cargo xtask axvisor test qemu \
   --arch aarch64 -g normal -c qemu-amp/host-rt
 ```
 
-This validation deliberately has no external guest-image dependency. Guest
-coexistence and FreeRTOS comparison remain separate follow-up validation work.
+The combined AArch64 case builds StarryOS, boots it with one vCPU on CPU 0,
+and keeps CPU 3 for the host realtime task:
+
+```sh
+cargo xtask starry build \
+  --config test-suit/axvisor/guest-build/starry-aarch64-amp.toml --smp 1
+cargo xtask axvisor test qemu \
+  --arch aarch64 -g normal -c qemu-amp/starry-host-rt
+```
+
+Its single success expression requires both the Starry shell marker and the
+host latency result. The guest uses partial-passthrough GICD/GICR, retains the
+firmware `/chosen` and `/aliases` console contract, and places runtime RAM in a
+reserved identity-mapped region so a physically passed-through NVMe device can
+DMA safely. The finite benchmark task remains resident after reporting because
+the dedicated realtime CPU is outside the ordinary scheduler domain.
+
+The host-only case deliberately has no external guest-image dependency.
+FreeRTOS comparison remains separate follow-up validation work.
 
 ## Rollback
 

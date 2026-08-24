@@ -49,20 +49,18 @@ mod shell;
 fn main() {
     banner::print_logo();
 
+    info!("Starting virtualization...");
+    let manager = manager::AxvmManager::new().expect("failed to initialize AxVM manager");
+    manager.init_default_vms();
+
     #[cfg(feature = "realtime-benchmark")]
-    {
-        info!("Starting AMP host realtime benchmark without guest");
+    manager.start_default_vms_with_hook(|| {
+        info!("Starting AMP host realtime benchmark");
         realtime::start();
         info!("AMP realtime task submitted");
-        ax_std::thread::yield_now();
-    }
+    });
     #[cfg(not(feature = "realtime-benchmark"))]
-    {
-        info!("Starting virtualization...");
-        let manager = manager::AxvmManager::new().expect("failed to initialize AxVM manager");
-        manager.init_default_vms();
-        manager.start_default_vms();
-    }
+    manager.start_default_vms();
 
     info!("[OK] Default guest initialized");
 

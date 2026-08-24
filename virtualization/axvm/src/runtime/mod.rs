@@ -46,6 +46,15 @@ pub fn init() {
 
 /// Start the VMM.
 pub fn start() {
+    start_with_hook(|| {});
+}
+
+/// Start the VMM and invoke `hook` after all default VMs have been started.
+///
+/// The hook runs before the caller blocks waiting for the VM set to stop. This
+/// keeps auxiliary host work in the same lifetime as the default guests
+/// without splitting VMM startup and shutdown synchronization across callers.
+pub fn start_with_hook(hook: impl FnOnce()) {
     info!("VMM starting, booting VMs...");
     for vm in crate::get_vm_list() {
         match vm.start() {
@@ -57,6 +66,8 @@ pub fn start() {
             Err(err) => warn!("VM[{}] boot failed, error {:?}", vm.id(), err),
         }
     }
+
+    hook();
 
     // Do not exit until all VMs are stopped.
     crate::host::task::wait_queue_wait_until(&VMM, || {

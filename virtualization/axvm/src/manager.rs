@@ -136,6 +136,11 @@ impl AxvmRuntime {
         crate::runtime::start();
     }
 
+    /// Start all initialized default VMs, invoke `hook`, and wait for them to stop.
+    pub fn start_default_vms_with_hook(&self, hook: impl FnOnce()) {
+        crate::runtime::start_with_hook(hook);
+    }
+
     /// Run an operation with a VM selected from the runtime registry.
     pub fn with_vm<T>(vm_id: VMId, f: impl FnOnce(AxVMRef) -> T) -> Option<T> {
         crate::get_vm_by_id(vm_id).map(f)

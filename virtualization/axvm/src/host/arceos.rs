@@ -231,10 +231,7 @@ fn send_ipi_to_all_except_current(cpu_num: usize) {
     }
     let current_cpu = modules::ax_hal::percpu::this_cpu_id();
     for cpu_id in 0..cpu_num {
-        // The broadcast is also used to wake reserved per-CPU virtualization
-        // initialization tasks. Infrastructure tasks are allowed on the
-        // realtime CPU; only ordinary workload affinity is isolated there.
-        if cpu_id != current_cpu {
+        if cpu_id != current_cpu && !modules::ax_task::is_realtime_cpu(cpu_id) {
             send_ipi(cpu_id);
         }
     }
@@ -336,12 +333,13 @@ impl HostPlatform for ArceOsHost {
     fn enable_virtualization_on_all_cpus(&self) -> AxResult {
         static CORES: AtomicUsize = AtomicUsize::new(0);
 
-        info!("Enabling hardware virtualization support on all cores...");
+        info!("Enabling hardware virtualization support on AxVM-owned cores...");
         CORES.store(0, Ordering::Release);
         crate::percpu::reset_enabled_cpu_mask();
 
         let cpu_count = self.cpu_count();
-        let virtualization_cpu_count = cpu_count;
+        let virtualization_cpu_count =
+            cpu_count - usize::from(modules::ax_task::realtime_cpu_id().is_some());
         let current_cpu = self.this_cpu_id();
         info!("Core {current_cpu} is initializing hardware virtualization support...");
         self.enable_virtualization_on_current_cpu()?;
@@ -349,7 +347,7 @@ impl HostPlatform for ArceOsHost {
         CORES.store(1, Ordering::Release);
 
         for cpu_id in 0..cpu_count {
-            if cpu_id == current_cpu {
+            if cpu_id == current_cpu || modules::ax_task::is_realtime_cpu(cpu_id) {
                 continue;
             }
             let task = modules::ax_task::TaskInner::new(

@@ -72,6 +72,13 @@ fn should_keep_generated_node(
         return true;
     }
 
+    // Preserve the firmware-selected console contract. `/chosen/stdout-path`
+    // may name the UART through an alias, so the two nodes must travel
+    // together into the guest tree.
+    if matches!(node_path, "/chosen" | "/aliases") {
+        return true;
+    }
+
     if node_path.starts_with("/cpus/cpu@") {
         return need_cpu_node(phys_cpu_ids, fdt, node_id, node_path);
     }
@@ -484,5 +491,41 @@ mod tests {
         assert!(reparsed.get_by_path_id("/cpus/cpu@100").is_some());
         assert!(reparsed.get_by_path_id("/cpus/cpu@0").is_none());
         assert!(reparsed.get_by_path_id("/cpus/cpu@101").is_none());
+    }
+
+    #[test]
+    fn generated_fdt_preserves_firmware_console_selection() {
+        let mut fdt = test_fdt("cpu@0=0");
+        let root = fdt.root_id();
+        let mut aliases = Node::new("aliases");
+        aliases.set_property({
+            let mut property = Property::new("serial0", alloc::vec![]);
+            property.set_string("/pl011@9000000");
+            property
+        });
+        fdt.add_node(root, aliases);
+        let mut chosen = Node::new("chosen");
+        chosen.set_property({
+            let mut property = Property::new("stdout-path", alloc::vec![]);
+            property.set_string("serial0:115200n8");
+            property
+        });
+        fdt.add_node(root, chosen);
+        fdt.add_node(root, Node::new("pl011@9000000"));
+
+        let cfg = AxVMCrateConfig {
+            base: axvmconfig::VMBaseConfig {
+                phys_cpu_ids: Some(alloc::vec![0]),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let dtb =
+            super::create_guest_fdt(&fdt, &[alloc::string::String::from("/pl011@9000000")], &cfg)
+                .unwrap();
+        let reparsed = Fdt::from_bytes(&dtb).unwrap();
+
+        assert!(reparsed.get_by_path_id("/chosen").is_some());
+        assert!(reparsed.get_by_path_id("/aliases").is_some());
     }
 }

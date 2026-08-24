@@ -64,6 +64,13 @@ fn run() {
         max,
         missed
     );
+
+    // A realtime CPU is intentionally outside the normal scheduler domain.
+    // Keep its owner task resident after the finite benchmark instead of
+    // entering the ordinary task-exit/reschedule path on that CPU.
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 fn percentile(sorted: &[u64], percentile: usize) -> u64 {
