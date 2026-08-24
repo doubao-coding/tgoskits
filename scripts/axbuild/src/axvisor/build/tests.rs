@@ -212,6 +212,35 @@ log = "Info"
 }
 
 #[test]
+fn load_cargo_config_injects_realtime_cpu_from_board_toml() {
+    let root = tempdir().unwrap();
+    let config_path = root.path().join("qemu-aarch64.toml");
+    fs::write(
+        &config_path,
+        r#"
+target = "aarch64-unknown-none-softfloat"
+features = ["realtime-benchmark"]
+log = "Info"
+realtime_cpu_id = 3
+vm_configs = []
+"#,
+    )
+    .unwrap();
+
+    let cargo = load_cargo_config(&request(
+        config_path,
+        "aarch64",
+        "aarch64-unknown-none-softfloat",
+    ))
+    .unwrap();
+
+    assert_eq!(
+        cargo.env.get("REALTIME_CPU_ID").map(String::as_str),
+        Some("3")
+    );
+}
+
+#[test]
 fn load_target_from_board_config_reads_target() {
     let root = tempdir().unwrap();
     let path = root.path().join("qemu-aarch64.toml");

@@ -13,10 +13,11 @@ first enqueue, and invalid topology fails during scheduler initialization.
 
 ## Configuration and invariants
 
-`REALTIME_CPU_ID` is parsed by the `ax-task` build script. `-1` (the default)
-means disabled; a nonnegative integer selects that logical CPU. Other negative
-values and IDs outside the build-time `SMP` capacity are build errors. At boot,
-the selected ID must be online and must not be the primary CPU.
+`realtime_cpu_id` is declared in the Axvisor build TOML. `-1` (the default)
+means disabled; a nonnegative integer selects that logical CPU. Axbuild passes
+the value into the `ax-task` compile-time configuration. Other negative values
+and IDs outside the build-time CPU capacity are build errors. At boot, the
+selected ID must be online and must not be the primary CPU.
 
 The generated runtime representation is `Option<usize>`; the `-1` sentinel is
 confined to the build boundary. The ordinary CPU mask is the online CPU set
@@ -61,7 +62,7 @@ The QEMU AMP manifest is under
 `test-suit/axvisor/normal/qemu-amp/host-rt`. Run it with:
 
 ```sh
-REALTIME_CPU_ID=3 cargo xtask axvisor test qemu \
+cargo xtask axvisor test qemu \
   --arch aarch64 -g normal -c qemu-amp/host-rt
 ```
 
@@ -70,6 +71,6 @@ coexistence and FreeRTOS comparison remain separate follow-up validation work.
 
 ## Rollback
 
-Building with `REALTIME_CPU_ID=-1` disables realtime task creation and restores
-the full ordinary CPU mask. Disabling `sched-rt-fifo` restores the prior global
-scheduler selection.
+Setting `realtime_cpu_id = -1` (or omitting it) disables realtime task creation
+and restores the full ordinary CPU mask. Disabling `sched-rt-fifo` restores the
+prior global scheduler selection.

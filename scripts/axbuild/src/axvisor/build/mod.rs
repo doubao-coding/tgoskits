@@ -70,6 +70,11 @@ fn to_cargo_config(
         )?;
     remove_dynamic_platform_features(&mut cargo.features);
     patch_axvisor_cargo_config(&mut cargo, request, metadata, &config.vm_configs)?;
+    if let Some(cpu_id) = config.realtime_cpu_id {
+        cargo
+            .env
+            .insert("REALTIME_CPU_ID".to_string(), cpu_id.to_string());
+    }
     Ok(cargo)
 }
 
